@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.2-mvp"
+AKVPS_VERSION="0.1.3-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -10,11 +10,13 @@ AKVPS_REPORT_DIR="/var/lib/akvps/reports"
 AKVPS_LATEST_REPORT="/var/lib/akvps/latest-report.md"
 AKVPS_LATEST_PANEL_REPORT="/var/lib/akvps/latest-panel-report.md"
 AKVPS_LATEST_KOMARI_REPORT="/var/lib/akvps/latest-komari-report.md"
+AKVPS_LATEST_KOMARI_SERVER_REPORT="/var/lib/akvps/latest-komari-server-report.md"
 AKVPS_SYSCTL="/etc/sysctl.d/99-akvps.conf"
 AKVPS_SSHD_CONF="/etc/ssh/sshd_config.d/99-akvps-key-only.conf"
 AKVPS_ROOT_DOMAIN="kouzho.cc"
 AKVPS_XUI_PORT="11123"
 AKVPS_PANEL_PORT="11123"
+AKVPS_KOMARI_PORT="25774"
 AKVPS_VLESS_PORT="11789"
 AKVPS_HY2_PORT="11799"
 AKVPS_HY2_HOP_START="39999"
@@ -32,6 +34,8 @@ PANEL_NAME=""
 PANEL_DOMAIN=""
 KOMARI_ENDPOINT=""
 KOMARI_TOKEN=""
+KOMARI_SERVER_NAME=""
+KOMARI_SERVER_DOMAIN=""
 PUBLIC_IPV4=""
 PUBLIC_IPV6=""
 SELECT_VLESS=0
@@ -51,6 +55,7 @@ XUI_API_TOKEN=""
 XUI_ACCESS_URL=""
 PANEL_REPORT_PATH=""
 KOMARI_REPORT_PATH=""
+KOMARI_SERVER_REPORT_PATH=""
 
 die() {
   echo
@@ -419,6 +424,20 @@ setup_panel_ufw() {
   ufw reload
 }
 
+setup_komari_server_ufw() {
+  info "配置 UFW"
+  local ssh_port
+  ssh_port="$(sshd -T 2>/dev/null | awk '/^port / {print $2; exit}')"
+  ssh_port="${ssh_port:-22}"
+  ufw --force reset
+  ufw default deny incoming
+  ufw default allow outgoing
+  ufw allow "$ssh_port/tcp" comment "ssh"
+  ufw allow "$AKVPS_KOMARI_PORT/tcp" comment "komari server"
+  ufw --force enable
+  ufw reload
+}
+
 cf_zone_id() {
   require_tools_for_json
   cloudflare_api GET "zones?name=$AKVPS_ROOT_DOMAIN" | jq -r '.result[0].id // empty'
@@ -717,6 +736,57 @@ EOF
   cat "$KOMARI_REPORT_PATH"
 }
 
+prompt_komari_server() {
+  info "Komari 主站信息"
+  while true; do
+    read -r -p "请输入主站短名，例如 status: " KOMARI_SERVER_NAME
+    KOMARI_SERVER_NAME="${KOMARI_SERVER_NAME// /}"
+    KOMARI_SERVER_DOMAIN="${KOMARI_SERVER_NAME}.${AKVPS_ROOT_DOMAIN}"
+    valid_domain "$KOMARI_SERVER_DOMAIN" && break
+    echo "主站短名无法组成合法域名，请重新输入。"
+  done
+  echo "主站域名：$KOMARI_SERVER_DOMAIN"
+}
+
+install_komari_server() {
+  info "安装 Komari 主站"
+  if port_in_use "$AKVPS_KOMARI_PORT"; then
+    die "端口 $AKVPS_KOMARI_PORT 已被占用。" "请先释放端口，再重新运行 akvps。"
+  fi
+  tmp_file="$(mktemp)"
+  curl -fsSL https://raw.githubusercontent.com/komari-monitor/komari/main/install-komari.sh -o "$tmp_file"
+  chmod +x "$tmp_file"
+  printf "\n" | "$tmp_file"
+  rm -f "$tmp_file"
+}
+
+generate_komari_server_report() {
+  info "生成 Komari 主站卡片"
+  KOMARI_SERVER_REPORT_PATH="$AKVPS_REPORT_DIR/$(date +%F-%H%M%S)-komari-server-${KOMARI_SERVER_NAME}.md"
+  local status_server access_url password
+  status_server="$(systemctl is-active komari 2>/dev/null || echo unknown)"
+  access_url="http://${KOMARI_SERVER_DOMAIN}:${AKVPS_KOMARI_PORT}"
+  password="$(journalctl -u komari --since "10 minutes ago" 2>/dev/null | grep "admin account created." | tail -n 1 | sed -e 's/.*admin account created.//' | xargs || true)"
+  cat > "$KOMARI_SERVER_REPORT_PATH" <<EOF
+# akvps Komari 主站卡片
+
+| 项目 | 内容 |
+|---|---|
+| 主站名称 | ${KOMARI_SERVER_NAME} |
+| 主站域名 | ${KOMARI_SERVER_DOMAIN} |
+| 访问地址 | ${access_url} |
+| 端口 | ${AKVPS_KOMARI_PORT} |
+| 用户名 | admin |
+| 初始密码 | ${password:-请查看 journalctl -u komari} |
+| 服务状态 | ${status_server} |
+
+EOF
+  chmod 600 "$KOMARI_SERVER_REPORT_PATH"
+  ln -sf "$KOMARI_SERVER_REPORT_PATH" "$AKVPS_LATEST_KOMARI_SERVER_REPORT"
+  echo "卡片已保存：$KOMARI_SERVER_REPORT_PATH"
+  cat "$KOMARI_SERVER_REPORT_PATH"
+}
+
 self_check() {
   echo "akvps 自检"
   echo "版本：$AKVPS_VERSION"
@@ -796,6 +866,22 @@ deploy_komari() {
   generate_komari_report
 }
 
+deploy_komari_server() {
+  need_root
+  ensure_dirs
+  load_envs
+  prompt_cloudflare_token
+  check_system
+  detect_public_ips
+  prompt_komari_server
+  install_light_tools
+  setup_komari_server_ufw
+  setup_dns_for_domain "$KOMARI_SERVER_DOMAIN"
+  wait_dns_for_domain "$KOMARI_SERVER_DOMAIN"
+  install_komari_server
+  generate_komari_server_report
+}
+
 show_latest_report() {
   if [[ -L "$AKVPS_LATEST_REPORT" || -f "$AKVPS_LATEST_REPORT" ]]; then
     cat "$AKVPS_LATEST_REPORT"
@@ -820,6 +906,30 @@ show_latest_panel_report() {
   fi
 }
 
+show_latest_komari_server_report() {
+  if [[ -L "$AKVPS_LATEST_KOMARI_SERVER_REPORT" || -f "$AKVPS_LATEST_KOMARI_SERVER_REPORT" ]]; then
+    cat "$AKVPS_LATEST_KOMARI_SERVER_REPORT"
+  else
+    echo "还没有 Komari 主站卡片。"
+  fi
+}
+
+probe_menu() {
+  while true; do
+    echo
+    echo "探针部署"
+    echo "1. 探针部署"
+    echo "2. 主站部署"
+    echo "0. 返回"
+    read -r -p "请选择: " sub
+    case "$sub" in
+      1) deploy_komari; return ;;
+      2) deploy_komari_server; return ;;
+      0) return ;;
+    esac
+  done
+}
+
 placeholder() {
   echo "这个功能后续版本开放。"
 }
@@ -830,8 +940,8 @@ main_menu() {
     echo "Angkou-Vps 轻量版 akvps $AKVPS_VERSION"
     echo
     echo "1. 初始设置"
-    echo "2. 主控面板部署"
-    echo "3. Komari 探针部署"
+    echo "2. 面板部署"
+    echo "3. 探针部署"
     echo "4. 接入信息"
     echo "5. 修复 / 设置 / 更新 / 卸载"
     echo "0. 退出"
@@ -840,16 +950,18 @@ main_menu() {
     case "$choice" in
       1) initial_setup; read -r -p "按回车返回菜单..." _ ;;
       2) deploy_panel; read -r -p "按回车返回菜单..." _ ;;
-      3) deploy_komari; read -r -p "按回车返回菜单..." _ ;;
+      3) probe_menu; read -r -p "按回车返回菜单..." _ ;;
       4)
         echo "1. 远端节点接入信息"
-        echo "2. 主控面板卡片"
-        echo "3. Komari 探针卡片"
+        echo "2. 面板卡片"
+        echo "3. 探针卡片"
+        echo "4. 主站卡片"
         echo "0. 返回"
         read -r -p "请选择: " sub
         [[ "$sub" == "1" ]] && show_latest_report
         [[ "$sub" == "2" ]] && show_latest_panel_report
         [[ "$sub" == "3" ]] && show_latest_komari_report
+        [[ "$sub" == "4" ]] && show_latest_komari_server_report
         read -r -p "按回车返回菜单..." _
         ;;
       5)
@@ -871,9 +983,11 @@ case "${1:-menu}" in
   init|initial-setup) initial_setup ;;
   panel|deploy-panel) deploy_panel ;;
   komari|deploy-komari) deploy_komari ;;
+  komari-server|deploy-komari-server) deploy_komari_server ;;
   report) show_latest_report ;;
   panel-report) show_latest_panel_report ;;
   komari-report) show_latest_komari_report ;;
+  komari-server-report) show_latest_komari_server_report ;;
   restore-ssh-password) restore_ssh_password ;;
   *) main_menu ;;
 esac
