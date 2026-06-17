@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.3-mvp"
+AKVPS_VERSION="0.1.4-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -256,7 +256,7 @@ prompt_protocols() {
 install_base_tools() {
   info "安装必要工具"
   apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -q curl ca-certificates ufw jq unzip tar cron openssl sqlite3 iproute2
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -q curl ca-certificates ufw jq unzip tar cron openssl sqlite3 iproute2 libc-bin
   timedatectl set-timezone Asia/Shanghai || true
 }
 
@@ -486,8 +486,8 @@ wait_dns_for_domain() {
   local domain="$1"
   local i resolved=""
   for i in $(seq 1 30); do
-    resolved="$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')"
-    if echo " $resolved " | grep -q " $PUBLIC_IPV4 "; then
+    resolved="$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ' || true)"
+    if [[ " $resolved " == *" $PUBLIC_IPV4 "* ]]; then
       echo "DNS 已生效：$domain -> $PUBLIC_IPV4"
       return 0
     fi
