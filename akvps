@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.0-mvp"
+AKVPS_VERSION="0.1.1-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
 AKVPS_STATE="/var/lib/akvps/state.env"
 AKVPS_REPORT_DIR="/var/lib/akvps/reports"
 AKVPS_LATEST_REPORT="/var/lib/akvps/latest-report.md"
+AKVPS_LATEST_PANEL_REPORT="/var/lib/akvps/latest-panel-report.md"
 AKVPS_SYSCTL="/etc/sysctl.d/99-akvps.conf"
 AKVPS_SSHD_CONF="/etc/ssh/sshd_config.d/99-akvps-key-only.conf"
 AKVPS_ROOT_DOMAIN="kouzho.cc"
 AKVPS_XUI_PORT="11123"
+AKVPS_PANEL_PORT="11123"
 AKVPS_VLESS_PORT="11789"
 AKVPS_HY2_PORT="11799"
 AKVPS_HY2_HOP_START="39999"
@@ -25,6 +27,8 @@ MASTER_IPV4=""
 CLOUDFLARE_TOKEN=""
 NODE_NAME=""
 NODE_DOMAIN=""
+PANEL_NAME=""
+PANEL_DOMAIN=""
 PUBLIC_IPV4=""
 PUBLIC_IPV6=""
 SELECT_VLESS=0
@@ -42,6 +46,7 @@ XUI_PASSWORD=""
 XUI_WEB_BASE_PATH=""
 XUI_API_TOKEN=""
 XUI_ACCESS_URL=""
+PANEL_REPORT_PATH=""
 
 die() {
   echo
@@ -120,7 +125,10 @@ prompt_config() {
     read -r -p "请输入主控 IPv4: " MASTER_IPV4
   done
   save_config_var "MASTER_IPV4" "$MASTER_IPV4"
+  prompt_cloudflare_token
+}
 
+prompt_cloudflare_token() {
   if [[ -n "$CLOUDFLARE_TOKEN" ]] && cloudflare_token_ok; then
     echo "Cloudflare Token 可用。"
     return
@@ -382,6 +390,22 @@ setup_ufw() {
   ufw reload
 }
 
+setup_panel_ufw() {
+  info "配置 UFW"
+  local ssh_port
+  ssh_port="$(sshd -T 2>/dev/null | awk '/^port / {print $2; exit}')"
+  ssh_port="${ssh_port:-22}"
+  ufw --force reset
+  ufw default deny incoming
+  ufw default allow outgoing
+  ufw allow "$ssh_port/tcp" comment "ssh"
+  ufw allow 80/tcp comment "acme"
+  ufw allow 443/tcp comment "https"
+  ufw allow "$AKVPS_PANEL_PORT/tcp" comment "3x-ui panel"
+  ufw --force enable
+  ufw reload
+}
+
 cf_zone_id() {
   require_tools_for_json
   cloudflare_api GET "zones?name=$AKVPS_ROOT_DOMAIN" | jq -r '.result[0].id // empty'
@@ -410,13 +434,29 @@ setup_dns() {
   echo "DNS 已更新：$NODE_DOMAIN"
 }
 
+setup_dns_for_domain() {
+  local domain="$1"
+  info "配置 Cloudflare DNS"
+  local zone_id
+  zone_id="$(cf_zone_id)"
+  [[ -n "$zone_id" ]] || die "找不到 Cloudflare Zone：$AKVPS_ROOT_DOMAIN" "请检查 Token 权限是否包含 Zone Read 和 DNS Edit。"
+  upsert_dns_record "$zone_id" "A" "$domain" "$PUBLIC_IPV4"
+  [[ -n "$PUBLIC_IPV6" ]] && upsert_dns_record "$zone_id" "AAAA" "$domain" "$PUBLIC_IPV6"
+  echo "DNS 已更新：$domain"
+}
+
 wait_dns() {
   info "等待 DNS 生效"
+  wait_dns_for_domain "$NODE_DOMAIN"
+}
+
+wait_dns_for_domain() {
+  local domain="$1"
   local i resolved=""
   for i in $(seq 1 30); do
-    resolved="$(getent ahostsv4 "$NODE_DOMAIN" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')"
+    resolved="$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')"
     if echo " $resolved " | grep -q " $PUBLIC_IPV4 "; then
-      echo "DNS 已生效：$NODE_DOMAIN -> $PUBLIC_IPV4"
+      echo "DNS 已生效：$domain -> $PUBLIC_IPV4"
       return 0
     fi
     echo "等待 DNS 生效中... $i/30"
@@ -459,6 +499,44 @@ install_or_configure_xui() {
   systemctl restart x-ui 2>/dev/null || true
   XUI_ACCESS_URL="https://${NODE_DOMAIN}:${AKVPS_XUI_PORT}/${XUI_WEB_BASE_PATH}"
   curl -kfsS --max-time 10 "https://127.0.0.1:${AKVPS_XUI_PORT}/${XUI_WEB_BASE_PATH}" >/dev/null 2>&1 || true
+}
+
+prompt_panel() {
+  info "主控面板信息"
+  while true; do
+    read -r -p "请输入主控短名，例如 panel: " PANEL_NAME
+    PANEL_NAME="${PANEL_NAME// /}"
+    PANEL_DOMAIN="${PANEL_NAME}.${AKVPS_ROOT_DOMAIN}"
+    valid_domain "$PANEL_DOMAIN" && break
+    echo "主控短名无法组成合法域名，请重新输入。"
+  done
+  echo "主控域名：$PANEL_DOMAIN"
+}
+
+install_or_configure_panel_xui() {
+  info "安装/配置 3x-ui 主控面板"
+  XUI_USERNAME="ak$(random_string 8)"
+  XUI_PASSWORD="$(random_string 18)"
+  XUI_WEB_BASE_PATH="$(random_string 18)"
+  export XUI_NONINTERACTIVE=1
+  export XUI_PANEL_PORT="$AKVPS_PANEL_PORT"
+  export XUI_DOMAIN="$PANEL_DOMAIN"
+  export XUI_SSL_MODE="domain"
+  export XUI_WEB_BASE_PATH="$XUI_WEB_BASE_PATH"
+  export XUI_USERNAME="$XUI_USERNAME"
+  export XUI_PASSWORD="$XUI_PASSWORD"
+  export XUI_DB_TYPE="sqlite"
+  export XUI_SERVER_IP="$PUBLIC_IPV4"
+  bash <(curl -fsSL https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh)
+
+  [[ -x "$XUI_BIN" ]] || die "3x-ui 安装后未找到 x-ui 命令。" "请检查官方安装脚本输出。"
+  "$XUI_BIN" setting -username "$XUI_USERNAME" -password "$XUI_PASSWORD" -port "$AKVPS_PANEL_PORT" -webBasePath "$XUI_WEB_BASE_PATH"
+  delete_old_api_tokens
+  XUI_API_TOKEN="$("$XUI_BIN" setting -getApiToken true 2>/dev/null | awk '/apiToken:/ {print $2; exit}')"
+  [[ -n "$XUI_API_TOKEN" ]] || die "未能生成 3x-ui API Token。" "请检查 3x-ui 是否正常运行。"
+  systemctl restart x-ui 2>/dev/null || true
+  XUI_ACCESS_URL="https://${PANEL_DOMAIN}:${AKVPS_PANEL_PORT}/${XUI_WEB_BASE_PATH}"
+  curl -kfsS --max-time 10 "https://127.0.0.1:${AKVPS_PANEL_PORT}/${XUI_WEB_BASE_PATH}" >/dev/null 2>&1 || true
 }
 
 protocol_text() {
@@ -536,6 +614,49 @@ EOF
   cat "$REPORT_PATH"
 }
 
+generate_panel_report() {
+  info "生成主控面板卡片"
+  PANEL_REPORT_PATH="$AKVPS_REPORT_DIR/$(date +%F-%H%M%S)-panel-${PANEL_NAME}.md"
+  local status_xui status_ufw status_dns
+  status_xui="$(systemctl is-active x-ui 2>/dev/null || echo unknown)"
+  status_ufw="$(ufw status 2>/dev/null | head -n1 || echo unknown)"
+  status_dns="A=$PUBLIC_IPV4"
+  [[ -n "$PUBLIC_IPV6" ]] && status_dns="$status_dns AAAA=$PUBLIC_IPV6"
+  cat > "$PANEL_REPORT_PATH" <<EOF
+# akvps 主控面板卡片
+
+## 一、登录信息
+
+| 项目 | 内容 |
+|---|---|
+| 主控名称 | ${PANEL_NAME} |
+| 主控域名 | ${PANEL_DOMAIN} |
+| 面板地址 | ${XUI_ACCESS_URL} |
+| 用户名 | ${XUI_USERNAME} |
+| 密码 | ${XUI_PASSWORD} |
+| API Token | ${XUI_API_TOKEN} |
+
+## 二、状态
+
+| 项目 | 状态 |
+|---|---|
+| DNS | ${status_dns} |
+| 3x-ui 服务 | ${status_xui} |
+| UFW | ${status_ufw} |
+| HTTPS | 已按 3x-ui 官方脚本配置 |
+
+## 三、后续
+
+- 远端节点跑完「初始设置」后，把节点接入信息填到这个主控面板。
+- 自动接入主控面板是后续功能，第一版先不做。
+
+EOF
+  chmod 600 "$PANEL_REPORT_PATH"
+  ln -sf "$PANEL_REPORT_PATH" "$AKVPS_LATEST_PANEL_REPORT"
+  echo "卡片已保存：$PANEL_REPORT_PATH"
+  cat "$PANEL_REPORT_PATH"
+}
+
 self_check() {
   echo "akvps 自检"
   echo "版本：$AKVPS_VERSION"
@@ -584,11 +705,39 @@ initial_setup() {
   generate_report
 }
 
+deploy_panel() {
+  need_root
+  ensure_dirs
+  load_envs
+  prompt_cloudflare_token
+  check_system
+  detect_public_ips
+  prompt_panel
+  if port_in_use "$AKVPS_PANEL_PORT"; then
+    [[ -x "$XUI_BIN" ]] || die "端口 $AKVPS_PANEL_PORT 已被占用。" "请先释放端口，再重新运行 akvps。"
+  fi
+  install_base_tools
+  setup_swap
+  setup_panel_ufw
+  setup_dns_for_domain "$PANEL_DOMAIN"
+  wait_dns_for_domain "$PANEL_DOMAIN"
+  install_or_configure_panel_xui
+  generate_panel_report
+}
+
 show_latest_report() {
   if [[ -L "$AKVPS_LATEST_REPORT" || -f "$AKVPS_LATEST_REPORT" ]]; then
     cat "$AKVPS_LATEST_REPORT"
   else
     echo "还没有报告。"
+  fi
+}
+
+show_latest_panel_report() {
+  if [[ -L "$AKVPS_LATEST_PANEL_REPORT" || -f "$AKVPS_LATEST_PANEL_REPORT" ]]; then
+    cat "$AKVPS_LATEST_PANEL_REPORT"
+  else
+    echo "还没有主控面板卡片。"
   fi
 }
 
@@ -602,25 +751,33 @@ main_menu() {
     echo "Angkou-Vps 轻量版 akvps $AKVPS_VERSION"
     echo
     echo "1. 初始设置"
-    echo "2. 状态检查"
-    echo "3. 接入信息"
-    echo "4. 修复工具"
-    echo "5. 设置 / 更新 / 卸载"
+    echo "2. 主控面板部署"
+    echo "3. 状态检查"
+    echo "4. 接入信息"
+    echo "5. 修复 / 设置 / 更新 / 卸载"
     echo "0. 退出"
     echo
     read -r -p "请选择: " choice
     case "$choice" in
       1) initial_setup; read -r -p "按回车返回菜单..." _ ;;
-      2) placeholder; read -r -p "按回车返回菜单..." _ ;;
-      3) show_latest_report; read -r -p "按回车返回菜单..." _ ;;
+      2) deploy_panel; read -r -p "按回车返回菜单..." _ ;;
+      3) placeholder; read -r -p "按回车返回菜单..." _ ;;
       4)
+        echo "1. 远端节点接入信息"
+        echo "2. 主控面板卡片"
+        echo "0. 返回"
+        read -r -p "请选择: " sub
+        [[ "$sub" == "1" ]] && show_latest_report
+        [[ "$sub" == "2" ]] && show_latest_panel_report
+        read -r -p "按回车返回菜单..." _
+        ;;
+      5)
         echo "1. 恢复 SSH 密码登录"
         echo "0. 返回"
         read -r -p "请选择: " sub
         [[ "$sub" == "1" ]] && restore_ssh_password
         read -r -p "按回车返回菜单..." _
         ;;
-      5) placeholder; read -r -p "按回车返回菜单..." _ ;;
       0) exit 0 ;;
     esac
   done
@@ -631,7 +788,9 @@ case "${1:-menu}" in
   check|self-check) self_check ;;
   menu) main_menu ;;
   init|initial-setup) initial_setup ;;
+  panel|deploy-panel) deploy_panel ;;
   report) show_latest_report ;;
+  panel-report) show_latest_panel_report ;;
   restore-ssh-password) restore_ssh_password ;;
   *) main_menu ;;
 esac
