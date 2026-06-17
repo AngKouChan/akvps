@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.6-mvp"
+AKVPS_VERSION="0.1.7-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -34,6 +34,8 @@ PANEL_NAME=""
 PANEL_DOMAIN=""
 PANEL_URL=""
 PANEL_API_TOKEN=""
+NODE_XUI_URL=""
+NODE_XUI_API_TOKEN=""
 KOMARI_ENDPOINT=""
 KOMARI_TOKEN=""
 KOMARI_SERVER_NAME=""
@@ -90,11 +92,16 @@ ensure_dirs() {
 load_envs() {
   [[ -f "$AKVPS_CONFIG" ]] && source "$AKVPS_CONFIG" || true
   [[ -f "$AKVPS_SECRETS" ]] && source "$AKVPS_SECRETS" || true
+  AKVPS_ROOT_DOMAIN="${AKVPS_ROOT_DOMAIN:-kouzho.cc}"
   MASTER_IPV4="${MASTER_IPV4:-}"
   CLOUDFLARE_TOKEN="${CLOUDFLARE_TOKEN:-}"
   PANEL_DOMAIN="${PANEL_DOMAIN:-}"
   PANEL_URL="${PANEL_URL:-}"
   PANEL_API_TOKEN="${PANEL_API_TOKEN:-}"
+  NODE_NAME="${NODE_NAME:-}"
+  NODE_DOMAIN="${NODE_DOMAIN:-}"
+  NODE_XUI_URL="${NODE_XUI_URL:-}"
+  NODE_XUI_API_TOKEN="${NODE_XUI_API_TOKEN:-}"
   KOMARI_ENDPOINT="${KOMARI_ENDPOINT:-}"
   KOMARI_TOKEN="${KOMARI_TOKEN:-}"
 }
@@ -135,6 +142,18 @@ valid_domain() {
   [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
 }
 
+mask_secret() {
+  local value="$1"
+  local len="${#value}"
+  if [[ -z "$value" ]]; then
+    echo "未设置"
+  elif [[ "$len" -le 10 ]]; then
+    echo "已设置"
+  else
+    echo "${value:0:6}...${value: -4}"
+  fi
+}
+
 prompt_config() {
   info "读取基础配置"
   while [[ -z "$MASTER_IPV4" ]] || ! valid_ipv4 "$MASTER_IPV4"; do
@@ -173,11 +192,23 @@ save_import_pair() {
     PANEL_URL|MASTER_PANEL_URL|XUI_PANEL_URL)
       save_config_var "PANEL_URL" "$value"
       ;;
+    NODE_NAME)
+      save_config_var "NODE_NAME" "$value"
+      ;;
+    NODE_DOMAIN)
+      save_config_var "NODE_DOMAIN" "$value"
+      ;;
+    NODE_XUI_URL|NODE_URL)
+      save_config_var "NODE_XUI_URL" "$value"
+      ;;
     CLOUDFLARE_TOKEN|CF_TOKEN)
       save_secret_var "CLOUDFLARE_TOKEN" "$value"
       ;;
     PANEL_API_TOKEN|XUI_API_TOKEN|MASTER_PANEL_API_TOKEN)
       save_secret_var "PANEL_API_TOKEN" "$value"
+      ;;
+    NODE_XUI_API_TOKEN|NODE_API_TOKEN)
+      save_secret_var "NODE_XUI_API_TOKEN" "$value"
       ;;
     *)
       echo "已跳过未知字段：$key"
@@ -222,6 +253,28 @@ import_panel_info() {
   echo "PANEL_URL=主控面板完整地址"
   echo "PANEL_API_TOKEN=3x-ui API Token"
   paste_import_lines "粘贴导入"
+}
+
+show_saved_info() {
+  need_root
+  ensure_dirs
+  load_envs
+  info "当前信息"
+  echo "基础信息："
+  echo "- 根域名：$AKVPS_ROOT_DOMAIN"
+  echo "- 主控 IPv4：${MASTER_IPV4:-未设置}"
+  echo "- Cloudflare Token：$(mask_secret "$CLOUDFLARE_TOKEN")"
+  echo
+  echo "主控信息："
+  echo "- 主控域名：${PANEL_DOMAIN:-未设置}"
+  echo "- 主控面板地址：${PANEL_URL:-未设置}"
+  echo "- 主控 API Token：$(mask_secret "$PANEL_API_TOKEN")"
+  echo
+  echo "当前节点信息："
+  echo "- 节点名称：${NODE_NAME:-未设置}"
+  echo "- 节点域名：${NODE_DOMAIN:-未设置}"
+  echo "- 节点面板地址：${NODE_XUI_URL:-未设置}"
+  echo "- 节点 API Token：$(mask_secret "$NODE_XUI_API_TOKEN")"
 }
 
 prompt_cloudflare_token() {
@@ -595,6 +648,100 @@ random_string() {
   openssl rand -hex 64 | cut -c "1-${1:-18}"
 }
 
+json_success() {
+  jq -e '.success == true' >/dev/null 2>&1
+}
+
+api_base_from_panel_url() {
+  local url="${PANEL_URL%/}"
+  printf "%s/panel/api" "$url"
+}
+
+node_base_path_from_url() {
+  local url="$1" path
+  path="/$(printf "%s" "$url" | sed -E 's|^[a-zA-Z]+://[^/]+/?||')"
+  [[ "$path" == "/" ]] || path="${path%/}/"
+  printf "%s" "$path"
+}
+
+xui_api() {
+  local method="$1" path="$2" data="${3:-}"
+  local api_base
+  api_base="$(api_base_from_panel_url)"
+  if [[ -n "$data" ]]; then
+    curl -kfsS -X "$method" "${api_base}${path}" \
+      -H "Authorization: Bearer $PANEL_API_TOKEN" \
+      -H "Content-Type: application/json" \
+      --data "$data"
+  else
+    curl -kfsS -X "$method" "${api_base}${path}" \
+      -H "Authorization: Bearer $PANEL_API_TOKEN" \
+      -H "Content-Type: application/json"
+  fi
+}
+
+build_node_payload() {
+  local base_path
+  base_path="$(node_base_path_from_url "$NODE_XUI_URL")"
+  jq -n \
+    --arg name "$NODE_NAME" \
+    --arg address "$NODE_DOMAIN" \
+    --arg basePath "$base_path" \
+    --arg apiToken "$NODE_XUI_API_TOKEN" \
+    --argjson port "$AKVPS_XUI_PORT" \
+    '{
+      name: $name,
+      remark: $name,
+      scheme: "https",
+      address: $address,
+      port: $port,
+      basePath: $basePath,
+      apiToken: $apiToken,
+      enable: true,
+      allowPrivateAddress: false,
+      tlsVerifyMode: "verify",
+      pinnedCertSha256: "",
+      inboundSyncMode: "all",
+      inboundTags: [],
+      outboundTag: ""
+    }'
+}
+
+connect_node_to_master() {
+  need_root
+  ensure_dirs
+  load_envs
+  require_tools_for_json
+  [[ -n "$PANEL_URL" ]] || die "缺少主控面板地址。" "请先到 0. 信息设置 -> 主控信息 导入 PANEL_URL。"
+  [[ -n "$PANEL_API_TOKEN" ]] || die "缺少主控 API Token。" "请先到 0. 信息设置 -> 主控信息 导入 PANEL_API_TOKEN。"
+  [[ -n "$NODE_NAME" && -n "$NODE_DOMAIN" && -n "$NODE_XUI_API_TOKEN" ]] || die "缺少当前节点信息。" "请先运行 1. 初始设置 或 2. 面板部署 -> 节点面板。"
+
+  info "测试节点连通"
+  local payload response status msg
+  payload="$(build_node_payload)"
+  response="$(xui_api POST "/nodes/test" "$payload")" || die "无法连接主控面板 API。" "请检查主控地址、主控 API Token 和防火墙。"
+  status="$(printf "%s" "$response" | jq -r '.obj.status // empty')"
+  msg="$(printf "%s" "$response" | jq -r '.msg // empty')"
+  [[ "$status" == "online" ]] || die "主控未能连上这个节点。" "请检查节点域名、11123 端口、节点 API Token。主控返回：${msg:-unknown}"
+
+  info "接入主控面板"
+  local existing_id action
+  existing_id="$(xui_api GET "/nodes/list" | jq -r --arg name "$NODE_NAME" '.obj[]? | select(.name == $name) | .id' | head -n1)" || existing_id=""
+  if [[ -n "$existing_id" ]]; then
+    response="$(xui_api POST "/nodes/update/${existing_id}" "$payload")" || die "主控更新节点失败。" "请检查主控 API Token 是否有效。"
+    action="已更新"
+  else
+    response="$(xui_api POST "/nodes/add" "$payload")" || die "主控添加节点失败。" "请检查主控 API Token 是否有效。"
+    action="已添加"
+  fi
+  if printf "%s" "$response" | json_success; then
+    echo "${action}主控节点：$NODE_NAME"
+  else
+    msg="$(printf "%s" "$response" | jq -r '.msg // empty')"
+    die "主控接入节点失败。" "主控返回：${msg:-unknown}"
+  fi
+}
+
 delete_old_api_tokens() {
   [[ -f "$XUI_DB" ]] || return 0
   systemctl stop x-ui 2>/dev/null || true
@@ -624,6 +771,10 @@ install_or_configure_xui() {
   [[ -n "$XUI_API_TOKEN" ]] || die "未能生成 3x-ui API Token。" "请检查 3x-ui 是否正常运行。"
   systemctl restart x-ui 2>/dev/null || true
   XUI_ACCESS_URL="https://${NODE_DOMAIN}:${AKVPS_XUI_PORT}/${XUI_WEB_BASE_PATH}"
+  save_config_var "NODE_NAME" "$NODE_NAME"
+  save_config_var "NODE_DOMAIN" "$NODE_DOMAIN"
+  save_config_var "NODE_XUI_URL" "$XUI_ACCESS_URL"
+  save_secret_var "NODE_XUI_API_TOKEN" "$XUI_API_TOKEN"
   curl -kfsS --max-time 10 "https://127.0.0.1:${AKVPS_XUI_PORT}/${XUI_WEB_BASE_PATH}" >/dev/null 2>&1 || true
 }
 
@@ -933,6 +1084,42 @@ initial_setup() {
 }
 
 deploy_panel() {
+  while true; do
+    echo
+    echo "面板部署"
+    echo "1. 节点面板"
+    echo "2. 主控面板"
+    echo "0. 返回"
+    read -r -p "请选择: " sub
+    case "$sub" in
+      1) deploy_node_panel; return ;;
+      2) deploy_master_panel; return ;;
+      0) return ;;
+    esac
+  done
+}
+
+deploy_node_panel() {
+  need_root
+  ensure_dirs
+  load_envs
+  prompt_config
+  check_system
+  detect_public_ips
+  prompt_node
+  SELECT_VLESS=0
+  SELECT_HY2=0
+  SELECT_HY2_HOP=0
+  check_ports
+  install_base_tools
+  setup_ufw
+  setup_dns
+  wait_dns
+  install_or_configure_xui
+  generate_report
+}
+
+deploy_master_panel() {
   need_root
   ensure_dirs
   load_envs
@@ -1033,11 +1220,13 @@ settings_info_menu() {
     echo "信息设置"
     echo "1. 基础信息"
     echo "2. 主控信息"
+    echo "3. 查看信息"
     echo "0. 返回"
     read -r -p "请选择: " sub
     case "$sub" in
       1) import_basic_info; return ;;
       2) import_panel_info; return ;;
+      3) show_saved_info; return ;;
       0) return ;;
     esac
   done
@@ -1071,12 +1260,14 @@ main_menu() {
         echo "2. 面板卡片"
         echo "3. 探针卡片"
         echo "4. 主站卡片"
+        echo "5. 一键接入主控"
         echo "0. 返回"
         read -r -p "请选择: " sub
         [[ "$sub" == "1" ]] && show_latest_report
         [[ "$sub" == "2" ]] && show_latest_panel_report
         [[ "$sub" == "3" ]] && show_latest_komari_report
         [[ "$sub" == "4" ]] && show_latest_komari_server_report
+        [[ "$sub" == "5" ]] && connect_node_to_master
         read -r -p "按回车返回菜单..." _
         ;;
       5)
@@ -1104,6 +1295,7 @@ case "${1:-menu}" in
   komari-report) show_latest_komari_report ;;
   komari-server-report) show_latest_komari_server_report ;;
   settings|info-settings) settings_info_menu ;;
+  connect-master|connect-node) connect_node_to_master ;;
   restore-ssh-password) restore_ssh_password ;;
   *) main_menu ;;
 esac
