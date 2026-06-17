@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.4-mvp"
+AKVPS_VERSION="0.1.5-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -482,11 +482,20 @@ wait_dns() {
   wait_dns_for_domain "$NODE_DOMAIN"
 }
 
+resolve_ipv4_public() {
+  local domain="$1"
+  curl -fsS --max-time 8 "https://cloudflare-dns.com/dns-query?name=${domain}&type=A" \
+    -H "accept: application/dns-json" 2>/dev/null \
+    | jq -r '.Answer[]? | select(.type == 1) | .data' \
+    | sort -u | tr '\n' ' ' || true
+}
+
 wait_dns_for_domain() {
   local domain="$1"
   local i resolved=""
   for i in $(seq 1 30); do
-    resolved="$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ' || true)"
+    resolved="$(resolve_ipv4_public "$domain")"
+    [[ -n "$resolved" ]] || resolved="$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ' || true)"
     if [[ " $resolved " == *" $PUBLIC_IPV4 "* ]]; then
       echo "DNS 已生效：$domain -> $PUBLIC_IPV4"
       return 0
