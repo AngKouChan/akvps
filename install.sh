@@ -12,7 +12,7 @@ need_root() {
 }
 
 install_akvps() {
-  if [[ -f "./akvps" ]]; then
+  if [[ "${AKVPS_USE_LOCAL:-0}" == "1" && -f "./akvps" ]]; then
     install -m 0755 "./akvps" "$AKVPS_BIN"
   else
     tmp_file="$(mktemp)"
