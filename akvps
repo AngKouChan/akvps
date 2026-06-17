@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.1-mvp"
+AKVPS_VERSION="0.1.2-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -9,6 +9,7 @@ AKVPS_STATE="/var/lib/akvps/state.env"
 AKVPS_REPORT_DIR="/var/lib/akvps/reports"
 AKVPS_LATEST_REPORT="/var/lib/akvps/latest-report.md"
 AKVPS_LATEST_PANEL_REPORT="/var/lib/akvps/latest-panel-report.md"
+AKVPS_LATEST_KOMARI_REPORT="/var/lib/akvps/latest-komari-report.md"
 AKVPS_SYSCTL="/etc/sysctl.d/99-akvps.conf"
 AKVPS_SSHD_CONF="/etc/ssh/sshd_config.d/99-akvps-key-only.conf"
 AKVPS_ROOT_DOMAIN="kouzho.cc"
@@ -29,6 +30,8 @@ NODE_NAME=""
 NODE_DOMAIN=""
 PANEL_NAME=""
 PANEL_DOMAIN=""
+KOMARI_ENDPOINT=""
+KOMARI_TOKEN=""
 PUBLIC_IPV4=""
 PUBLIC_IPV6=""
 SELECT_VLESS=0
@@ -47,6 +50,7 @@ XUI_WEB_BASE_PATH=""
 XUI_API_TOKEN=""
 XUI_ACCESS_URL=""
 PANEL_REPORT_PATH=""
+KOMARI_REPORT_PATH=""
 
 die() {
   echo
@@ -81,6 +85,8 @@ load_envs() {
   [[ -f "$AKVPS_SECRETS" ]] && source "$AKVPS_SECRETS" || true
   MASTER_IPV4="${MASTER_IPV4:-}"
   CLOUDFLARE_TOKEN="${CLOUDFLARE_TOKEN:-}"
+  KOMARI_ENDPOINT="${KOMARI_ENDPOINT:-}"
+  KOMARI_TOKEN="${KOMARI_TOKEN:-}"
 }
 
 save_config_var() {
@@ -246,6 +252,13 @@ install_base_tools() {
   info "安装必要工具"
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y -q curl ca-certificates ufw jq unzip tar cron openssl sqlite3 iproute2
+  timedatectl set-timezone Asia/Shanghai || true
+}
+
+install_light_tools() {
+  info "安装必要工具"
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -q curl ca-certificates
   timedatectl set-timezone Asia/Shanghai || true
 }
 
@@ -657,6 +670,53 @@ EOF
   cat "$PANEL_REPORT_PATH"
 }
 
+prompt_komari() {
+  info "Komari 探针信息"
+  while true; do
+    read -r -p "请输入 Komari 面板地址，例如 https://status.kouzho.cc: " KOMARI_ENDPOINT
+    KOMARI_ENDPOINT="${KOMARI_ENDPOINT%/}"
+    [[ "$KOMARI_ENDPOINT" =~ ^https?://[^[:space:]]+$ ]] && break
+    echo "地址格式不正确，请以 http:// 或 https:// 开头。"
+  done
+  while [[ -z "$KOMARI_TOKEN" ]]; do
+    read -r -s -p "请输入 Komari 节点 Token: " KOMARI_TOKEN
+    echo
+  done
+  save_config_var "KOMARI_ENDPOINT" "$KOMARI_ENDPOINT"
+  save_secret_var "KOMARI_TOKEN" "$KOMARI_TOKEN"
+}
+
+deploy_komari_agent() {
+  info "安装 Komari 探针"
+  bash <(curl -fsSL https://raw.githubusercontent.com/komari-monitor/komari-agent/main/install.sh) \
+    -e "$KOMARI_ENDPOINT" \
+    -t "$KOMARI_TOKEN" \
+    --disable-web-ssh
+}
+
+generate_komari_report() {
+  info "生成 Komari 探针卡片"
+  KOMARI_REPORT_PATH="$AKVPS_REPORT_DIR/$(date +%F-%H%M%S)-komari-agent.md"
+  local status_agent token_masked
+  status_agent="$(systemctl is-active komari-agent 2>/dev/null || echo unknown)"
+  token_masked="${KOMARI_TOKEN:0:6}******${KOMARI_TOKEN: -4}"
+  cat > "$KOMARI_REPORT_PATH" <<EOF
+# akvps Komari 探针卡片
+
+| 项目 | 内容 |
+|---|---|
+| Komari 面板 | ${KOMARI_ENDPOINT} |
+| Token | ${token_masked} |
+| 服务状态 | ${status_agent} |
+| 远程控制 | 已关闭 Web SSH / 远程命令 |
+
+EOF
+  chmod 600 "$KOMARI_REPORT_PATH"
+  ln -sf "$KOMARI_REPORT_PATH" "$AKVPS_LATEST_KOMARI_REPORT"
+  echo "卡片已保存：$KOMARI_REPORT_PATH"
+  cat "$KOMARI_REPORT_PATH"
+}
+
 self_check() {
   echo "akvps 自检"
   echo "版本：$AKVPS_VERSION"
@@ -725,11 +785,30 @@ deploy_panel() {
   generate_panel_report
 }
 
+deploy_komari() {
+  need_root
+  ensure_dirs
+  load_envs
+  check_system
+  install_light_tools
+  prompt_komari
+  deploy_komari_agent
+  generate_komari_report
+}
+
 show_latest_report() {
   if [[ -L "$AKVPS_LATEST_REPORT" || -f "$AKVPS_LATEST_REPORT" ]]; then
     cat "$AKVPS_LATEST_REPORT"
   else
     echo "还没有报告。"
+  fi
+}
+
+show_latest_komari_report() {
+  if [[ -L "$AKVPS_LATEST_KOMARI_REPORT" || -f "$AKVPS_LATEST_KOMARI_REPORT" ]]; then
+    cat "$AKVPS_LATEST_KOMARI_REPORT"
+  else
+    echo "还没有 Komari 探针卡片。"
   fi
 }
 
@@ -752,7 +831,7 @@ main_menu() {
     echo
     echo "1. 初始设置"
     echo "2. 主控面板部署"
-    echo "3. 状态检查"
+    echo "3. Komari 探针部署"
     echo "4. 接入信息"
     echo "5. 修复 / 设置 / 更新 / 卸载"
     echo "0. 退出"
@@ -761,14 +840,16 @@ main_menu() {
     case "$choice" in
       1) initial_setup; read -r -p "按回车返回菜单..." _ ;;
       2) deploy_panel; read -r -p "按回车返回菜单..." _ ;;
-      3) placeholder; read -r -p "按回车返回菜单..." _ ;;
+      3) deploy_komari; read -r -p "按回车返回菜单..." _ ;;
       4)
         echo "1. 远端节点接入信息"
         echo "2. 主控面板卡片"
+        echo "3. Komari 探针卡片"
         echo "0. 返回"
         read -r -p "请选择: " sub
         [[ "$sub" == "1" ]] && show_latest_report
         [[ "$sub" == "2" ]] && show_latest_panel_report
+        [[ "$sub" == "3" ]] && show_latest_komari_report
         read -r -p "按回车返回菜单..." _
         ;;
       5)
@@ -789,8 +870,10 @@ case "${1:-menu}" in
   menu) main_menu ;;
   init|initial-setup) initial_setup ;;
   panel|deploy-panel) deploy_panel ;;
+  komari|deploy-komari) deploy_komari ;;
   report) show_latest_report ;;
   panel-report) show_latest_panel_report ;;
+  komari-report) show_latest_komari_report ;;
   restore-ssh-password) restore_ssh_password ;;
   *) main_menu ;;
 esac
