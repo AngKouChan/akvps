@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.54-mvp"
+AKVPS_VERSION="0.1.55-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1348,6 +1348,11 @@ client_exists() {
   xui_api GET "/clients/get/${email}" 2>/dev/null | jq -e '.success == true and .obj != null' >/dev/null 2>&1
 }
 
+client_get_json() {
+  local email="$1"
+  xui_api GET "/clients/get/${email}" 2>/dev/null | jq -c '.obj // empty'
+}
+
 client_attached_to_inbound() {
   local email="$1" inbound_id="$2"
   xui_api GET "/clients/get/${email}" 2>/dev/null | jq -e --argjson inboundId "$inbound_id" '
@@ -1364,6 +1369,61 @@ attach_client_to_inbound() {
   fi
   msg="$(printf "%s" "$response" | jq -r '.msg // empty')"
   echo "客户端绑定失败：${msg:-unknown}"
+  return 1
+}
+
+client_credentials_complete() {
+  local client_json="$1" kind="$2"
+  printf "%s" "$client_json" | jq -e --arg kind "$kind" '
+    (.client.email // "") != ""
+    and (.client.subId // "") != ""
+    and (.client.enable // false) == true
+    and (
+      if $kind == "vless" then
+        (.client.uuid // .client.id // "") != "" and (.client.flow // "") == "xtls-rprx-vision"
+      elif ($kind == "hy2" or $kind == "hy2hop") then
+        (.client.auth // "") != ""
+      else
+        true
+      end
+    )' >/dev/null 2>&1
+}
+
+client_update_payload() {
+  local client_json="$1" kind="$2" flow="${3:-}"
+  printf "%s" "$client_json" | jq -c --arg kind "$kind" --arg flow "$flow" '
+    .client
+    | .enable = true
+    | .totalGB = (.totalGB // 0)
+    | .expiryTime = (.expiryTime // 0)
+    | .tgId = (.tgId // 0)
+    | .limitIp = (.limitIp // 0)
+    | .comment = (.comment // "")
+    | .reset = (.reset // 0)
+    | .group = (.group // "")
+    | if $kind == "vless" then .flow = $flow else .flow = "" end'
+}
+
+repair_master_client() {
+  local email="$1" kind="$2" flow="$3" client_json payload response msg
+  client_json="$(client_get_json "$email")" || return 1
+  [[ -n "$client_json" ]] || return 1
+  if client_credentials_complete "$client_json" "$kind"; then
+    return 0
+  fi
+  payload="$(client_update_payload "$client_json" "$kind" "$flow")"
+  response="$(xui_api POST "/clients/update/${email}" "$payload")" || return 1
+  if printf "%s" "$response" | json_success; then
+    echo "已修正客户端资料：$email"
+    client_json="$(client_get_json "$email")" || return 1
+    client_credentials_complete "$client_json" "$kind" || {
+      echo "客户端资料仍不完整：$email"
+      return 1
+    }
+    return 0
+  fi
+  msg="$(printf "%s" "$response" | jq -r '.msg // empty')"
+  echo "客户端资料修正失败：${msg:-unknown}"
   return 1
 }
 
@@ -1453,7 +1513,11 @@ master_inbound_status_lines() {
     any=1
     inbound_id="$(master_inbound_id_by_tag "$tag" 2>/dev/null || true)"
     if [[ -n "$inbound_id" ]]; then
-      link_status="$(client_link_status_word "$email" "$kind")"
+      if client_exists "$email" && ! client_credentials_complete "$(client_get_json "$email")" "$kind"; then
+        link_status="资料不完整"
+      else
+        link_status="$(client_link_status_word "$email" "$kind")"
+      fi
       echo "- ${kind} 入站：已存在；客户端：${email}；链接：${link_status}"
     else
       echo "- ${kind} 入站：未找到；客户端：${email}；链接：未确认"
@@ -1508,6 +1572,7 @@ ensure_master_client() {
     else
       attach_client_to_inbound "$email" "$inbound_id" || return 1
     fi
+    repair_master_client "$email" "$kind" "$flow" || return 1
     verify_client_links "$email" "$kind" || return 1
     return 0
   fi
@@ -1515,6 +1580,7 @@ ensure_master_client() {
   response="$(xui_api POST "/clients/add" "$payload")" || return 1
   if printf "%s" "$response" | json_success; then
     echo "已创建客户端：$email"
+    repair_master_client "$email" "$kind" "$flow" || return 1
     verify_client_links "$email" "$kind" || return 1
     return 0
   fi
@@ -2315,6 +2381,12 @@ self_check_inbounds() {
   [[ "$(expected_client_link_scheme hy2hop)" == "hysteria2://" ]]
   client_links_are_complete '{"success":true,"obj":["hysteria2://example?mport=39999-59999"]}' hy2hop "hysteria2://"
   ! client_links_are_complete '{"success":true,"obj":["hysteria2://example"]}' hy2hop "hysteria2://"
+  client_credentials_complete '{"client":{"email":"aktest-vless","subId":"sub1","uuid":"uuid1","flow":"xtls-rprx-vision","enable":true}}' vless
+  ! client_credentials_complete '{"client":{"email":"aktest-vless","subId":"","uuid":"uuid1","flow":"xtls-rprx-vision","enable":true}}' vless
+  client_credentials_complete '{"client":{"email":"aktest-hy2","subId":"sub2","auth":"auth1","enable":true}}' hy2
+  ! client_credentials_complete '{"client":{"email":"aktest-hy2","subId":"sub2","auth":"","enable":true}}' hy2
+  client_update_payload '{"client":{"email":"aktest-vless","subId":"sub1","uuid":"uuid1","flow":"","enable":false,"totalGB":0,"expiryTime":0,"tgId":0,"limitIp":0,"comment":"","reset":0}}' vless "xtls-rprx-vision" | jq -e '
+    .enable == true and .flow == "xtls-rprx-vision" and .email == "aktest-vless"' >/dev/null
   vless="$(build_minimal_inbound_payload 1 vless akvps-aktest-vless "aktest vless" "$AKVPS_VLESS_PORT" 7 '{"settings":{"clients":[{"email":"old","id":"old-id"}]},"streamSettings":{"realitySettings":{"privateKey":"old-private","settings":{"publicKey":"old-public"},"shortIds":["oldsid"],"target":"old.example:443","serverNames":["old.example"]}}}')"
   printf "%s" "$vless" | jq -e '
     (.settings | fromjson | .clients[0].email) == "old"
