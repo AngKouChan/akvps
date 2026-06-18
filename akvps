@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.56-mvp"
+AKVPS_VERSION="0.1.57-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1451,7 +1451,7 @@ client_links_are_complete() {
 }
 
 verify_client_links() {
-  local email="$1" kind="$2" scheme response hop_ports
+  local email="$1" kind="$2" scheme response client_json sub_id hop_ports
   scheme="$(expected_client_link_scheme "$kind")"
   [[ -n "$scheme" ]] || return 0
   response="$(xui_api GET "/clients/links/${email}" 2>/dev/null || true)"
@@ -1464,6 +1464,22 @@ verify_client_links() {
     return 1
   }
   echo "客户端链接已生成：$email"
+  client_json="$(client_get_json "$email")" || return 1
+  sub_id="$(printf "%s" "$client_json" | jq -r '.client.subId // empty')"
+  [[ -n "$sub_id" ]] || {
+    echo "客户端订阅 ID 未生成：$email"
+    return 1
+  }
+  response="$(xui_api GET "/clients/subLinks/${sub_id}" 2>/dev/null || true)"
+  client_links_are_complete "$response" "$kind" "$scheme" || {
+    echo "客户端订阅链接未生成：$email"
+    if [[ "$kind" == "hy2hop" ]]; then
+      hop_ports="${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}"
+      echo "端口跳跃订阅还应包含：mport=${hop_ports}"
+    fi
+    return 1
+  }
+  echo "客户端订阅链接已生成：$email"
 }
 
 client_link_status_word() {
@@ -2402,6 +2418,8 @@ self_check_inbounds() {
   [[ "$(expected_client_link_scheme hy2hop)" == "hysteria2://" ]]
   client_links_are_complete '{"success":true,"obj":["hysteria2://example?mport=39999-59999"]}' hy2hop "hysteria2://"
   ! client_links_are_complete '{"success":true,"obj":["hysteria2://example"]}' hy2hop "hysteria2://"
+  client_links_are_complete '{"success":true,"obj":["vless://uuid@example:443?security=reality#aktest"]}' vless "vless://"
+  ! client_links_are_complete '{"success":true,"obj":[]}' vless "vless://"
   client_credentials_complete '{"client":{"email":"aktest-vless","subId":"sub1","uuid":"uuid1","flow":"xtls-rprx-vision","enable":true}}' vless
   ! client_credentials_complete '{"client":{"email":"aktest-vless","subId":"","uuid":"uuid1","flow":"xtls-rprx-vision","enable":true}}' vless
   client_credentials_complete '{"client":{"email":"aktest-hy2","subId":"sub2","auth":"auth1","enable":true}}' hy2
