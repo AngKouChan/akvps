@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.68-mvp"
+AKVPS_VERSION="0.1.69-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1583,32 +1583,44 @@ master_inbound_saved_complete() {
   inbound_json="$(master_inbound_by_id "$inbound_id" 2>/dev/null || true)"
   [[ -n "$inbound_json" ]] || return 1
   printf "%s" "$inbound_json" | jq -e --arg kind "$kind" --argjson nodeId "$node_id" --arg ports "${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}" '
+    def json_obj:
+      if type == "string" then (fromjson? // {})
+      elif type == "object" then .
+      else {}
+      end;
+    (.settings | json_obj) as $settings
+    | (.streamSettings | json_obj) as $stream
+    |
     .nodeId == $nodeId
     and .shareAddrStrategy == "node"
     and (.shareAddr // "") == ""
     and (
       if $kind == "vless" then
         .protocol == "vless"
-        and ((.settings | fromjson).decryption // "") == "none"
-        and ((.streamSettings | fromjson).network // "") == "tcp"
-        and ((.streamSettings | fromjson).security // "") == "reality"
-        and (((.streamSettings | fromjson).realitySettings.target // "") | test(":[0-9]+$"))
-        and (((.streamSettings | fromjson).realitySettings.dest // "") | test(":[0-9]+$"))
-        and (((.streamSettings | fromjson).realitySettings.privateKey // "") != "")
-        and (((.streamSettings | fromjson).realitySettings.settings.publicKey // "") != "")
-        and (((.streamSettings | fromjson).realitySettings.shortIds // []) | length > 0)
-        and (((.streamSettings | fromjson).realitySettings.serverNames // []) | length > 0)
+        and ($settings.decryption // "") == "none"
+        and ($settings.encryption // "") == "none"
+        and ($stream.network // "") == "tcp"
+        and ($stream.security // "") == "reality"
+        and (($stream.realitySettings.target // "") | test(":[0-9]+$"))
+        and (($stream.realitySettings.dest // "") | test(":[0-9]+$"))
+        and (($stream.realitySettings.privateKey // "") != "")
+        and (($stream.realitySettings.settings.publicKey // "") != "")
+        and (($stream.realitySettings.settings.fingerprint // "") != "")
+        and (($stream.realitySettings.shortIds // []) | length > 0)
+        and all(($stream.realitySettings.shortIds // [])[]; type == "string" and length > 0)
+        and (($stream.realitySettings.serverNames // []) | length > 0)
+        and all(($stream.realitySettings.serverNames // [])[]; type == "string" and length > 0)
       elif ($kind == "hy2" or $kind == "hy2hop") then
         .protocol == "hysteria"
-        and ((.settings | fromjson).version // 0) == 2
-        and ((.streamSettings | fromjson).network // "") == "hysteria"
-        and ((.streamSettings | fromjson).security // "") == "tls"
-        and (((.streamSettings | fromjson).tlsSettings.alpn // []) | index("h3") != null)
-        and (((.streamSettings | fromjson).tlsSettings.certificates[0].certificateFile // "") != "")
-        and (((.streamSettings | fromjson).tlsSettings.certificates[0].keyFile // "") != "")
+        and ($settings.version // 0) == 2
+        and ($stream.network // "") == "hysteria"
+        and ($stream.security // "") == "tls"
+        and (($stream.tlsSettings.alpn // []) | index("h3") != null)
+        and (($stream.tlsSettings.certificates[0].certificateFile // "") != "")
+        and (($stream.tlsSettings.certificates[0].keyFile // "") != "")
         and (if $kind == "hy2hop" then
-          ((.streamSettings | fromjson).finalmask.quicParams.udpHop.ports // "") == $ports
-          and ((.streamSettings | fromjson).hysteriaSettings.finalmask.quicParams.udpHop.ports // "") == $ports
+          ($stream.finalmask.quicParams.udpHop.ports // "") == $ports
+          and ($stream.hysteriaSettings.finalmask.quicParams.udpHop.ports // "") == $ports
         else true end)
       else
         true
@@ -1728,7 +1740,7 @@ client_update_payload() {
     | .reset = (.reset // 0)
     | .group = (.group // "")
     | if $kind == "vless" then
-        .id = (.id // .uuid // "")
+        .id = ((.uuid // .id // "") | tostring)
         | .flow = $flow
       else
         .flow = ""
@@ -2901,6 +2913,26 @@ self_check_inbounds() {
   ! client_credentials_complete '{"client":{"email":"aktest-hy2","subId":"sub2","auth":"","enable":true}}' hy2
   client_update_payload '{"client":{"email":"aktest-vless","subId":"sub1","uuid":"uuid1","flow":"","enable":false,"totalGB":0,"expiryTime":0,"tgId":0,"limitIp":0,"comment":"","reset":0}}' vless "xtls-rprx-vision" | jq -e '
     .enable == true and .flow == "xtls-rprx-vision" and .email == "aktest-vless" and .id == "uuid1"' >/dev/null
+  client_update_payload '{"client":{"id":42,"email":"aktest-vless","subId":"sub1","uuid":"uuid-from-db","flow":"","enable":true}}' vless "xtls-rprx-vision" | jq -e '
+    .id == "uuid-from-db" and .flow == "xtls-rprx-vision"' >/dev/null
+  printf '%s' '{"id":9,"nodeId":1,"shareAddrStrategy":"node","shareAddr":"","protocol":"vless","settings":{"clients":[],"decryption":"none","encryption":"none"},"streamSettings":{"network":"tcp","security":"reality","realitySettings":{"target":"www.microsoft.com:443","dest":"www.microsoft.com:443","privateKey":"priv","serverNames":["www.microsoft.com"],"shortIds":["abcd"],"settings":{"publicKey":"pub","fingerprint":"chrome"}}}}' | jq -e --arg kind vless --argjson nodeId 1 --arg ports "${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}" '
+    def json_obj:
+      if type == "string" then (fromjson? // {})
+      elif type == "object" then .
+      else {}
+      end;
+    (.settings | json_obj) as $settings
+    | (.streamSettings | json_obj) as $stream
+    | .nodeId == $nodeId
+      and .shareAddrStrategy == "node"
+      and (.shareAddr // "") == ""
+      and .protocol == "vless"
+      and ($settings.decryption // "") == "none"
+      and ($settings.encryption // "") == "none"
+      and ($stream.security // "") == "reality"
+      and (($stream.realitySettings.settings.fingerprint // "") != "")
+      and all(($stream.realitySettings.shortIds // [])[]; type == "string" and length > 0)
+      and all(($stream.realitySettings.serverNames // [])[]; type == "string" and length > 0)' >/dev/null
   vless="$(build_minimal_inbound_payload 1 vless akvps-aktest-vless "aktest vless" "$AKVPS_VLESS_PORT" 7 '{"settings":{"clients":[{"email":"old","id":"old-id"}]},"streamSettings":{"realitySettings":{"privateKey":"old-private","settings":{"publicKey":"old-public"},"shortIds":["oldsid"],"target":"old.example:443","serverNames":["old.example"]}}}')"
   printf "%s" "$vless" | jq -e '
     (.settings | fromjson | .clients[0].email) == "old"
