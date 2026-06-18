@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.82-mvp"
+AKVPS_VERSION="0.1.83-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1956,6 +1956,18 @@ attach_client_to_inbound() {
   return 1
 }
 
+ensure_client_attached_to_inbound() {
+  local email="$1" inbound_id="$2"
+  if client_attached_to_inbound "$email" "$inbound_id"; then
+    return 0
+  fi
+  attach_client_to_inbound "$email" "$inbound_id" || return 1
+  client_attached_to_inbound "$email" "$inbound_id" || {
+    echo "客户端未成功关联入站：$email"
+    return 1
+  }
+}
+
 client_credentials_complete() {
   local client_json="$1" kind="$2"
   printf "%s" "$client_json" | jq -e --arg kind "$kind" '
@@ -2379,12 +2391,10 @@ ensure_master_client() {
       ;;
   esac
   if client_exists "$email"; then
-    if client_attached_to_inbound "$email" "$inbound_id"; then
-      echo "客户端已存在：$email"
-    else
-      attach_client_to_inbound "$email" "$inbound_id" || return 1
-    fi
+    echo "客户端已存在：$email"
+    ensure_client_attached_to_inbound "$email" "$inbound_id" || return 1
     repair_master_client "$email" "$kind" "$flow" "$inbound_id" || return 1
+    ensure_client_attached_to_inbound "$email" "$inbound_id" || return 1
     verify_client_links "$email" "$kind" || return 1
     return 0
   fi
@@ -2392,7 +2402,9 @@ ensure_master_client() {
   response="$(xui_api POST "/clients/add" "$payload")" || return 1
   if printf "%s" "$response" | json_success; then
     echo "已创建客户端：$email"
+    ensure_client_attached_to_inbound "$email" "$inbound_id" || return 1
     repair_master_client "$email" "$kind" "$flow" "$inbound_id" || return 1
+    ensure_client_attached_to_inbound "$email" "$inbound_id" || return 1
     verify_client_links "$email" "$kind" || return 1
     return 0
   fi
