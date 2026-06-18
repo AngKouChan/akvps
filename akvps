@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.73-mvp"
+AKVPS_VERSION="0.1.74-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1457,6 +1457,33 @@ mock_kind_from_email() {
   esac
 }
 
+mock_sync_client_to_inbounds() {
+  local email="$1" tmp
+  tmp="$(mktemp)"
+  jq --arg email "$email" '
+    def settings_obj:
+      if (.settings | type) == "string" then (.settings | fromjson? // {})
+      elif (.settings | type) == "object" then .settings
+      else {}
+      end;
+    (.clients[]? | select(.client.email == $email)) as $record
+    | .inbounds = (.inbounds | map(
+        . as $ib
+        | if (($record.inboundIds // []) | index($ib.id)) != null then
+          (settings_obj) as $settings
+          | ($record.client
+              | if (.uuid // "") != "" then .id = .uuid else . end
+              | del(.uuid)
+            ) as $client
+          | .settings = (($settings + {
+              clients:((($settings.clients // []) | map(select(.email != $email))) + [$client])
+            }) | tojson)
+        else
+          .
+        end
+      ))' "$AKVPS_MOCK_STATE" >"$tmp" && mv "$tmp" "$AKVPS_MOCK_STATE"
+}
+
 xui_api_mock() {
   local method="$1" path="$2" data="${3:-}" id email sub_id kind link tmp
   [[ -n "$AKVPS_MOCK_STATE" && -f "$AKVPS_MOCK_STATE" ]] || return 1
@@ -1513,6 +1540,7 @@ xui_api_mock() {
           inboundIds:$payload.inboundIds,
           externalLinks:[]
         }]' "$AKVPS_MOCK_STATE" >"$tmp" && mv "$tmp" "$AKVPS_MOCK_STATE"
+      mock_sync_client_to_inbounds "$email"
       jq -cn '{success:true,msg:"Client added",obj:{}}'
       ;;
     "POST /clients/update/"*)
@@ -1532,6 +1560,7 @@ xui_api_mock() {
                else {} end)
           )
         else . end))' "$AKVPS_MOCK_STATE" >"$tmp" && mv "$tmp" "$AKVPS_MOCK_STATE"
+      mock_sync_client_to_inbounds "$email"
       jq -cn '{success:true,msg:"Client updated",obj:{}}'
       ;;
     "POST /clients/"*"/attach")
@@ -1539,6 +1568,7 @@ xui_api_mock() {
       email="${email%/attach}"
       tmp="$(mktemp)"
       jq --arg email "$email" --argjson payload "$data" '.clients = (.clients | map(if .client.email == $email then .inboundIds = $payload.inboundIds else . end))' "$AKVPS_MOCK_STATE" >"$tmp" && mv "$tmp" "$AKVPS_MOCK_STATE"
+      mock_sync_client_to_inbounds "$email"
       jq -cn '{success:true,msg:"Client attached",obj:{}}'
       ;;
     "GET /clients/links/"*)
@@ -1763,6 +1793,34 @@ client_credentials_complete() {
     )' >/dev/null 2>&1
 }
 
+inbound_client_complete() {
+  local inbound_id="$1" email="$2" kind="$3" inbound_json
+  [[ -n "$inbound_id" ]] || return 0
+  inbound_json="$(master_inbound_by_id "$inbound_id" 2>/dev/null || true)"
+  [[ -n "$inbound_json" ]] || return 1
+  printf "%s" "$inbound_json" | jq -e --arg email "$email" --arg kind "$kind" '
+    def json_obj:
+      if type == "string" then (fromjson? // {})
+      elif type == "object" then .
+      else {}
+      end;
+    (.settings | json_obj | .clients // []) as $clients
+    | any($clients[];
+        (.email // "") == $email
+        and (.enable // false) == true
+        and (.subId // "") != ""
+        and (
+          if $kind == "vless" then
+            (.id // "") != "" and (.flow // "") == "xtls-rprx-vision"
+          elif ($kind == "hy2" or $kind == "hy2hop") then
+            (.auth // "") != ""
+          else
+            true
+          end
+        )
+      )' >/dev/null 2>&1
+}
+
 client_update_payload() {
   local client_json="$1" kind="$2" flow="${3:-}"
   local email sub_id uuid auth
@@ -1801,6 +1859,10 @@ repair_master_client() {
   client_json="$(client_get_json "$email")" || return 1
   [[ -n "$client_json" ]] || return 1
   if client_credentials_complete "$client_json" "$kind"; then
+    inbound_client_complete "$inbound_id" "$email" "$kind" || {
+      echo "入站内客户端资料不完整：$email"
+      return 1
+    }
     return 0
   fi
   payload="$(client_update_payload "$client_json" "$kind" "$flow")"
@@ -1812,6 +1874,10 @@ repair_master_client() {
     client_json="$(client_get_json "$email")" || return 1
     client_credentials_complete "$client_json" "$kind" || {
       echo "客户端资料仍不完整：$email"
+      return 1
+    }
+    inbound_client_complete "$inbound_id" "$email" "$kind" || {
+      echo "入站内客户端资料仍不完整：$email"
       return 1
     }
     return 0
@@ -3104,7 +3170,11 @@ self_check_master_flow() {
     and (.clients | length) == 2
     and any(.clients[]; .client.email == "aktest-vless" and .client.subId == "aktest-vless-sub" and .client.uuid != "" and .client.flow == "xtls-rprx-vision" and (.inboundIds | length) == 1)
     and any(.clients[]; .client.email == "aktest-hy2hop" and .client.subId == "aktest-hy2hop-sub" and .client.auth != "" and (.inboundIds | length) == 1)
+    and any(.inbounds[]; .tag == "akvps-aktest-vless" and any((.settings | fromjson | .clients)[]; .email == "aktest-vless" and .id != "" and .flow == "xtls-rprx-vision"))
+    and any(.inbounds[]; .tag == "akvps-aktest-hy2hop" and any((.settings | fromjson | .clients)[]; .email == "aktest-hy2hop" and .auth != ""))
   ' "$AKVPS_MOCK_STATE" >/dev/null
+  inbound_client_complete "$(master_inbound_id_by_tag "akvps-aktest-vless")" "aktest-vless" vless
+  inbound_client_complete "$(master_inbound_id_by_tag "akvps-aktest-hy2hop")" "aktest-hy2hop" hy2hop
   verify_client_links "aktest-vless" vless >/dev/null
   verify_client_links "aktest-hy2hop" hy2hop >/dev/null
   jq -e --arg host "$NODE_DOMAIN" '
