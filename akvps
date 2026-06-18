@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.85-mvp"
+AKVPS_VERSION="0.1.86-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1564,6 +1564,23 @@ mock_sync_client_to_inbounds() {
       ))' "$AKVPS_MOCK_STATE" >"$tmp" && mv "$tmp" "$AKVPS_MOCK_STATE"
 }
 
+mock_desync_client_from_inbounds() {
+  local email="$1" tmp
+  tmp="$(mktemp)"
+  jq --arg email "$email" '
+    def settings_obj:
+      if (.settings | type) == "string" then (.settings | fromjson? // {})
+      elif (.settings | type) == "object" then .settings
+      else {}
+      end;
+    .inbounds = (.inbounds | map(
+      (settings_obj) as $settings
+      | .settings = (($settings + {
+          clients:(($settings.clients // []) | map(select(.email != $email)))
+        }) | tojson)
+    ))' "$AKVPS_MOCK_STATE" >"$tmp" && mv "$tmp" "$AKVPS_MOCK_STATE"
+}
+
 xui_api_mock() {
   local method="$1" path="$2" data="${3:-}" id email sub_id kind link tmp
   [[ -n "$AKVPS_MOCK_STATE" && -f "$AKVPS_MOCK_STATE" ]] || return 1
@@ -1591,6 +1608,9 @@ xui_api_mock() {
       ;;
     "GET /inbounds/list")
       jq -c '{success:true,obj:.inbounds}' "$AKVPS_MOCK_STATE"
+      ;;
+    "GET /inbounds/options")
+      jq -c '{success:true,obj:(.inbounds | map({id, remark, tag, protocol, port, tlsFlowCapable:(.protocol == "vless"), nodeId}))}' "$AKVPS_MOCK_STATE"
       ;;
     "GET /inbounds/get/"*)
       id="${path##*/}"
@@ -1656,9 +1676,24 @@ xui_api_mock() {
       email="${path#/clients/}"
       email="${email%/attach}"
       tmp="$(mktemp)"
-      jq --arg email "$email" --argjson payload "$data" '.clients = (.clients | map(if .client.email == $email then .inboundIds = $payload.inboundIds else . end))' "$AKVPS_MOCK_STATE" >"$tmp" && mv "$tmp" "$AKVPS_MOCK_STATE"
+      jq --arg email "$email" --argjson payload "$data" '
+        .clients = (.clients | map(if .client.email == $email then
+          .inboundIds = (((.inboundIds // []) + ($payload.inboundIds // [])) | unique)
+        else . end))' "$AKVPS_MOCK_STATE" >"$tmp" && mv "$tmp" "$AKVPS_MOCK_STATE"
       mock_sync_client_to_inbounds "$email"
       jq -cn '{success:true,msg:"Client attached",obj:{}}'
+      ;;
+    "POST /clients/"*"/detach")
+      email="${path#/clients/}"
+      email="${email%/detach}"
+      tmp="$(mktemp)"
+      jq --arg email "$email" --argjson payload "$data" '
+        .clients = (.clients | map(if .client.email == $email then
+          .inboundIds = ((.inboundIds // []) - ($payload.inboundIds // []))
+        else . end))' "$AKVPS_MOCK_STATE" >"$tmp" && mv "$tmp" "$AKVPS_MOCK_STATE"
+      mock_desync_client_from_inbounds "$email"
+      mock_sync_client_to_inbounds "$email"
+      jq -cn '{success:true,msg:"Client detached",obj:{}}'
       ;;
     "GET /clients/links/"*)
       email="${path##*/}"
@@ -1824,6 +1859,16 @@ master_inbound_by_id() {
   xui_api GET "/inbounds/get/${inbound_id}" | jq -c '.obj // empty'
 }
 
+master_inbound_option_available() {
+  local inbound_id="$1"
+  xui_api GET "/inbounds/options" 2>/dev/null | jq -e --argjson inboundId "$inbound_id" '
+    .success == true
+    and any(.obj[]?;
+      .id == $inboundId
+      and ((.remark // "") != "" or (.tag // "") != "")
+    )' >/dev/null 2>&1
+}
+
 master_inbound_saved_complete() {
   local inbound_id="$1" kind="$2" node_id="$3" inbound_json
   inbound_json="$(master_inbound_by_id "$inbound_id" 2>/dev/null || true)"
@@ -1872,6 +1917,7 @@ master_inbound_saved_complete() {
         true
       end
     )' >/dev/null 2>&1
+  master_inbound_option_available "$inbound_id"
 }
 
 decode_json_field() {
@@ -1935,6 +1981,16 @@ client_get_json() {
   xui_api GET "/clients/get/${encoded_email}" 2>/dev/null | jq -c '.obj // empty'
 }
 
+client_inbound_ids_json() {
+  local email="$1" client_json
+  client_json="$(client_get_json "$email")" || return 1
+  [[ -n "$client_json" ]] || {
+    printf "[]"
+    return 0
+  }
+  printf "%s" "$client_json" | jq -c '[.inboundIds[]? | tonumber]'
+}
+
 client_attached_to_inbound() {
   local email="$1" inbound_id="$2" encoded_email
   encoded_email="$(url_encode "$email")"
@@ -1956,6 +2012,22 @@ attach_client_to_inbound() {
   return 1
 }
 
+detach_client_from_inbounds() {
+  local email="$1" ids_json="$2" payload response msg encoded_email count
+  count="$(printf "%s" "$ids_json" | jq 'length')"
+  [[ "$count" -gt 0 ]] || return 0
+  encoded_email="$(url_encode "$email")"
+  payload="$(jq -cn --argjson ids "$ids_json" '{inboundIds:$ids}')"
+  response="$(xui_api POST "/clients/${encoded_email}/detach" "$payload")" || return 1
+  if printf "%s" "$response" | json_success; then
+    echo "已清理客户端错误入站关联：$email"
+    return 0
+  fi
+  msg="$(printf "%s" "$response" | jq -r '.msg // empty')"
+  echo "客户端解绑失败：${msg:-unknown}"
+  return 1
+}
+
 ensure_client_attached_to_inbound() {
   local email="$1" inbound_id="$2"
   if client_attached_to_inbound "$email" "$inbound_id"; then
@@ -1966,6 +2038,20 @@ ensure_client_attached_to_inbound() {
     echo "客户端未成功关联入站：$email"
     return 1
   }
+}
+
+ensure_client_only_attached_to_inbound() {
+  local email="$1" inbound_id="$2" ids_json wrong_ids_json final_ids_json
+  ids_json="$(client_inbound_ids_json "$email")" || return 1
+  wrong_ids_json="$(printf "%s" "$ids_json" | jq -c --argjson inboundId "$inbound_id" '[.[] | select(. != $inboundId)]')"
+  detach_client_from_inbounds "$email" "$wrong_ids_json" || return 1
+  ensure_client_attached_to_inbound "$email" "$inbound_id" || return 1
+  final_ids_json="$(client_inbound_ids_json "$email")" || return 1
+  printf "%s" "$final_ids_json" | jq -e --argjson inboundId "$inbound_id" '
+    length == 1 and .[0] == $inboundId' >/dev/null 2>&1 || {
+      echo "客户端关联入站仍不正确：$email"
+      return 1
+    }
 }
 
 client_credentials_complete() {
@@ -2392,9 +2478,9 @@ ensure_master_client() {
   esac
   if client_exists "$email"; then
     echo "客户端已存在：$email"
-    ensure_client_attached_to_inbound "$email" "$inbound_id" || return 1
+    ensure_client_only_attached_to_inbound "$email" "$inbound_id" || return 1
     repair_master_client "$email" "$kind" "$flow" "$inbound_id" || return 1
-    ensure_client_attached_to_inbound "$email" "$inbound_id" || return 1
+    ensure_client_only_attached_to_inbound "$email" "$inbound_id" || return 1
     verify_client_links "$email" "$kind" || return 1
     return 0
   fi
@@ -2402,9 +2488,9 @@ ensure_master_client() {
   response="$(xui_api POST "/clients/add" "$payload")" || return 1
   if printf "%s" "$response" | json_success; then
     echo "已创建客户端：$email"
-    ensure_client_attached_to_inbound "$email" "$inbound_id" || return 1
+    ensure_client_only_attached_to_inbound "$email" "$inbound_id" || return 1
     repair_master_client "$email" "$kind" "$flow" "$inbound_id" || return 1
-    ensure_client_attached_to_inbound "$email" "$inbound_id" || return 1
+    ensure_client_only_attached_to_inbound "$email" "$inbound_id" || return 1
     verify_client_links "$email" "$kind" || return 1
     return 0
   fi
@@ -3587,6 +3673,51 @@ self_check_master_flow() {
     and (.clients[0].inboundIds == [1])
   ' "$AKVPS_MOCK_STATE" >/dev/null
   verify_client_links "aktest-vless" vless >/dev/null
+
+  NODE_PROTOCOLS="vless"
+  mock_state_cleanup
+  mock_state_init
+  jq '.inbounds += [{
+      id: 1,
+      nodeId: 7,
+      tag: "akvps-old-vless",
+      remark: "old vless",
+      port: 11789,
+      protocol: "vless",
+      settings: "{\"clients\":[],\"decryption\":\"none\"}",
+      streamSettings: "{\"network\":\"tcp\",\"security\":\"reality\",\"realitySettings\":{\"privateKey\":\"old-private\",\"settings\":{\"publicKey\":\"old-public\"},\"shortIds\":[\"oldsid\"],\"target\":\"old.example:443\",\"serverNames\":[\"old.example\"]}}",
+      sniffing: "{}",
+      shareAddrStrategy: "node",
+      shareAddr: ""
+    }]
+    | .clients += [{
+      client: {
+        email: "aktest-vless",
+        subId: "aktest-vless-sub",
+        uuid: "old-uuid",
+        id: "old-uuid",
+        flow: "xtls-rprx-vision",
+        enable: true,
+        totalGB: 0,
+        expiryTime: 0,
+        tgId: 0,
+        limitIp: 0,
+        comment: "",
+        reset: 0
+      },
+      inboundIds: [1],
+      externalLinks: []
+    }]' "$AKVPS_MOCK_STATE" >"${AKVPS_MOCK_STATE}.tmp" && mv "${AKVPS_MOCK_STATE}.tmp" "$AKVPS_MOCK_STATE"
+  ensure_master_inbounds >/dev/null
+  target_id="$(master_inbound_id_by_tag "akvps-aktest-vless")"
+  jq -e --argjson targetId "$target_id" '
+    (.inbounds | length) == 2
+    and any(.inbounds[]; .id == $targetId and .tag == "akvps-aktest-vless" and .remark == "aktest vless")
+    and any(.clients[]; .client.email == "aktest-vless" and .inboundIds == [$targetId])
+    and any(.inbounds[]; .tag == "akvps-aktest-vless" and any((.settings | fromjson | .clients)[]; .email == "aktest-vless"))
+    and all(.inbounds[] | select(.tag == "akvps-old-vless"); all((.settings | fromjson | .clients)[]?; .email != "aktest-vless"))
+  ' "$AKVPS_MOCK_STATE" >/dev/null
+  master_inbound_option_available "$target_id"
   echo "主控一键接入链路自检通过。"
 }
 
