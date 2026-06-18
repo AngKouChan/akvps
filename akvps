@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.35-mvp"
+AKVPS_VERSION="0.1.36-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1716,9 +1716,9 @@ local_deploy_menu() {
     echo
     echo "本机部署"
     echo "1. 代理节点"
-    echo "2. 探针节点"
-    echo "3. 主控面板"
-    echo "4. 探针主站"
+    echo "2. 探针部署"
+    echo "3. 设为主控机"
+    echo "4. 设为探针站"
     echo "0. 返回"
     read -r -p "请选择: " sub
     case "$sub" in
@@ -1817,7 +1817,7 @@ show_latest_panel_report() {
 show_master_import_card() {
   load_envs
   if [[ -z "$PANEL_URL" || -z "$PANEL_API_TOKEN" ]]; then
-    echo "还没有新 VPS 一键导入信息。"
+    echo "还没有一键导入信息。"
     echo "请先在本机部署主控面板。"
     return
   fi
@@ -1849,7 +1849,7 @@ view_info_menu() {
     echo
     echo "查看信息"
     echo "1. 当前配置"
-    echo "2. 新 VPS 一键导入卡片"
+    echo "2. 一键导入信息"
     echo "3. 节点接入报告"
     echo "4. 主控面板卡片"
     echo "5. 探针节点卡片"
