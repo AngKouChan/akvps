@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.57-mvp"
+AKVPS_VERSION="0.1.58-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1401,7 +1401,12 @@ client_update_payload() {
     | .comment = (.comment // "")
     | .reset = (.reset // 0)
     | .group = (.group // "")
-    | if $kind == "vless" then .flow = $flow else .flow = "" end'
+    | if $kind == "vless" then
+        .id = (.id // .uuid // "")
+        | .flow = $flow
+      else
+        .flow = ""
+      end'
 }
 
 repair_master_client() {
@@ -2425,7 +2430,7 @@ self_check_inbounds() {
   client_credentials_complete '{"client":{"email":"aktest-hy2","subId":"sub2","auth":"auth1","enable":true}}' hy2
   ! client_credentials_complete '{"client":{"email":"aktest-hy2","subId":"sub2","auth":"","enable":true}}' hy2
   client_update_payload '{"client":{"email":"aktest-vless","subId":"sub1","uuid":"uuid1","flow":"","enable":false,"totalGB":0,"expiryTime":0,"tgId":0,"limitIp":0,"comment":"","reset":0}}' vless "xtls-rprx-vision" | jq -e '
-    .enable == true and .flow == "xtls-rprx-vision" and .email == "aktest-vless"' >/dev/null
+    .enable == true and .flow == "xtls-rprx-vision" and .email == "aktest-vless" and .id == "uuid1"' >/dev/null
   vless="$(build_minimal_inbound_payload 1 vless akvps-aktest-vless "aktest vless" "$AKVPS_VLESS_PORT" 7 '{"settings":{"clients":[{"email":"old","id":"old-id"}]},"streamSettings":{"realitySettings":{"privateKey":"old-private","settings":{"publicKey":"old-public"},"shortIds":["oldsid"],"target":"old.example:443","serverNames":["old.example"]}}}')"
   printf "%s" "$vless" | jq -e '
     (.settings | fromjson | .clients[0].email) == "old"
