@@ -2431,6 +2431,7 @@ master_inbound_status_lines() {
     fi
   done
   [[ "$any" -eq 1 ]] || echo "- 主控入站：未记录节点协议"
+  [[ "$any" -eq 1 ]] && echo "- 面板提示：若 3x-ui 客户端页的关联入站只显示数字，请在浏览器里强制刷新页面。"
 }
 
 build_client_payload() {
