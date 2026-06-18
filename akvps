@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.27-mvp"
+AKVPS_VERSION="0.1.28-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -288,6 +288,7 @@ save_import_pair() {
 
 paste_import_lines() {
   local title="$1"
+  local count=0
   info "$title"
   echo "请粘贴配置，格式：KEY=VALUE"
   echo "粘贴完成后，单独输入 END 结束。"
@@ -296,11 +297,16 @@ paste_import_lines() {
     [[ -z "${line// /}" || "$line" == \#* ]] && continue
     if [[ "$line" == *"="* ]]; then
       save_import_pair "${line%%=*}" "${line#*=}"
+      count=$((count + 1))
     else
       echo "已跳过格式不正确的一行。"
     fi
   done
-  echo "已导入。敏感信息不会在这里显示。"
+  if [[ "$count" -eq 0 ]]; then
+    echo "没有导入任何内容。"
+  else
+    echo "已导入 ${count} 项。敏感信息不会在这里显示。"
+  fi
 }
 
 import_basic_info() {
@@ -1641,6 +1647,27 @@ show_latest_panel_report() {
   fi
 }
 
+show_master_import_card() {
+  load_envs
+  if [[ -z "$PANEL_URL" || -z "$PANEL_API_TOKEN" ]]; then
+    echo "还没有主控导入信息。"
+    echo "请先在本机部署主控面板。"
+    return
+  fi
+  cat <<EOF
+把下面内容复制到其他 VPS 的「基础设置 -> 一键导入」：
+
+MASTER_IPV4=${MASTER_IPV4}
+MASTER_IPV6=${MASTER_IPV6}
+PANEL_DOMAIN=${PANEL_DOMAIN}
+PANEL_URL=${PANEL_URL}
+PANEL_API_TOKEN=${PANEL_API_TOKEN}
+KOMARI_SERVER_DOMAIN=${KOMARI_SERVER_DOMAIN}
+KOMARI_ENDPOINT=${KOMARI_ENDPOINT}
+END
+EOF
+}
+
 show_latest_komari_server_report() {
   if [[ -L "$AKVPS_LATEST_KOMARI_SERVER_REPORT" || -f "$AKVPS_LATEST_KOMARI_SERVER_REPORT" ]]; then
     cat "$AKVPS_LATEST_KOMARI_SERVER_REPORT"
@@ -1654,18 +1681,20 @@ view_info_menu() {
     echo
     echo "查看信息"
     echo "1. 当前配置"
-    echo "2. 远端节点接入信息"
-    echo "3. 面板卡片"
-    echo "4. 探针卡片"
-    echo "5. 主站卡片"
+    echo "2. 主控导入卡片"
+    echo "3. 节点接入报告"
+    echo "4. 主控面板卡片"
+    echo "5. 探针Agent卡片"
+    echo "6. 探针主站卡片"
     echo "0. 返回"
     read -r -p "请选择: " sub
     case "$sub" in
       1) show_saved_info; pause_menu ;;
-      2) show_latest_report; pause_menu ;;
-      3) show_latest_panel_report; pause_menu ;;
-      4) show_latest_komari_report; pause_menu ;;
-      5) show_latest_komari_server_report; pause_menu ;;
+      2) show_master_import_card; pause_menu ;;
+      3) show_latest_report; pause_menu ;;
+      4) show_latest_panel_report; pause_menu ;;
+      5) show_latest_komari_report; pause_menu ;;
+      6) show_latest_komari_server_report; pause_menu ;;
       0) return ;;
     esac
   done
