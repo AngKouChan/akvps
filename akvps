@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.66-mvp"
+AKVPS_VERSION="0.1.67-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1312,45 +1312,54 @@ xui_api_http() {
 }
 
 mock_state_init() {
+  local node_name node_address
+  node_name="${NODE_NAME:-aktest}"
+  node_address="${NODE_DOMAIN:-}"
+  [[ -n "$node_address" ]] || node_address="$(url_host_from_url "${NODE_XUI_URL:-}")"
+  [[ -n "$node_address" ]] || node_address="aktest.example.com"
   AKVPS_MOCK_STATE="$(mktemp)"
-  jq -n '{nodes:[{id:7,name:"aktest"}],inbounds:[],clients:[]}' >"$AKVPS_MOCK_STATE"
+  jq -n --arg name "$node_name" --arg address "$node_address" \
+    '{nodes:[{id:7,name:$name,address:$address}],inbounds:[],clients:[]}' >"$AKVPS_MOCK_STATE"
 }
 
 mock_state_seed_broken_vless() {
-  cat >"$AKVPS_MOCK_STATE" <<'EOF'
-{
-  "nodes": [{"id": 7, "name": "aktest"}],
-  "inbounds": [{
-    "id": 1,
-    "nodeId": 7,
-    "tag": "akvps-aktest-vless",
-    "remark": "aktest vless old",
-    "port": 11789,
-    "protocol": "vless",
-    "settings": "{\"clients\":[],\"decryption\":\"none\"}",
-    "streamSettings": "{\"network\":\"tcp\",\"security\":\"reality\",\"realitySettings\":{\"privateKey\":\"old-private\",\"settings\":{\"publicKey\":\"old-public\"},\"shortIds\":[\"oldsid\"],\"target\":\"old.example:443\",\"serverNames\":[\"old.example\"]}}",
-    "sniffing": "{}"
-  }],
-  "clients": [{
-    "client": {
-      "email": "aktest-vless",
-      "subId": "",
-      "uuid": "old-uuid",
-      "id": "old-uuid",
-      "flow": "",
-      "enable": false,
-      "totalGB": 0,
-      "expiryTime": 0,
-      "tgId": 0,
-      "limitIp": 0,
-      "comment": "",
-      "reset": 0
-    },
-    "inboundIds": [],
-    "externalLinks": []
-  }]
-}
-EOF
+  local node_name node_address
+  node_name="${NODE_NAME:-aktest}"
+  node_address="${NODE_DOMAIN:-}"
+  [[ -n "$node_address" ]] || node_address="$(url_host_from_url "${NODE_XUI_URL:-}")"
+  [[ -n "$node_address" ]] || node_address="aktest.example.com"
+  jq -n --arg nodeName "$node_name" --arg nodeAddress "$node_address" '{
+    nodes: [{id: 7, name: $nodeName, address: $nodeAddress}],
+    inbounds: [{
+      id: 1,
+      nodeId: 7,
+      tag: "akvps-aktest-vless",
+      remark: "aktest vless old",
+      port: 11789,
+      protocol: "vless",
+      settings: "{\"clients\":[],\"decryption\":\"none\"}",
+      streamSettings: "{\"network\":\"tcp\",\"security\":\"reality\",\"realitySettings\":{\"privateKey\":\"old-private\",\"settings\":{\"publicKey\":\"old-public\"},\"shortIds\":[\"oldsid\"],\"target\":\"old.example:443\",\"serverNames\":[\"old.example\"]}}",
+      sniffing: "{}"
+    }],
+    clients: [{
+      client: {
+        email: "aktest-vless",
+        subId: "",
+        uuid: "old-uuid",
+        id: "old-uuid",
+        flow: "",
+        enable: false,
+        totalGB: 0,
+        expiryTime: 0,
+        tgId: 0,
+        limitIp: 0,
+        comment: "",
+        reset: 0
+      },
+      inboundIds: [],
+      externalLinks: []
+    }]
+  }' >"$AKVPS_MOCK_STATE"
 }
 
 mock_state_cleanup() {
@@ -1359,13 +1368,37 @@ mock_state_cleanup() {
 }
 
 mock_client_link() {
-  local kind="$1"
+  local kind="$1" host
+  host="$(mock_link_host "$kind")"
   case "$kind" in
-    vless) printf "vless://uuid@example.com:443?security=reality#aktest" ;;
-    hy2) printf "hysteria2://auth@example.com:11799?insecure=1#aktest" ;;
-    hy2hop) printf "hysteria2://auth@example.com:39999?mport=%s-%s&insecure=1#aktest" "$AKVPS_HY2_HOP_START" "$AKVPS_HY2_HOP_END" ;;
+    vless) printf "vless://uuid@%s:443?security=reality#aktest" "$host" ;;
+    hy2) printf "hysteria2://auth@%s:11799?insecure=1#aktest" "$host" ;;
+    hy2hop) printf "hysteria2://auth@%s:39999?mport=%s-%s&insecure=1#aktest" "$host" "$AKVPS_HY2_HOP_START" "$AKVPS_HY2_HOP_END" ;;
     *) printf "" ;;
   esac
+}
+
+mock_link_host() {
+  local kind="$1" node_name tag node_id strategy share host
+  node_name="${NODE_NAME:-aktest}"
+  tag="akvps-${node_name}-${kind}"
+  node_id="$(jq -r --arg tag "$tag" '.inbounds[]? | select(.tag == $tag) | .nodeId // empty' "$AKVPS_MOCK_STATE" | head -n1)"
+  strategy="$(jq -r --arg tag "$tag" '.inbounds[]? | select(.tag == $tag) | .shareAddrStrategy // "node"' "$AKVPS_MOCK_STATE" | head -n1)"
+  share="$(jq -r --arg tag "$tag" '.inbounds[]? | select(.tag == $tag) | .shareAddr // empty' "$AKVPS_MOCK_STATE" | head -n1)"
+  if [[ "$strategy" == "custom" && -n "$share" ]]; then
+    host="$share"
+  elif [[ -n "$node_id" ]]; then
+    host="$(jq -r --argjson id "$node_id" '.nodes[]? | select(.id == $id) | .address // empty' "$AKVPS_MOCK_STATE" | head -n1)"
+  else
+    host=""
+  fi
+  [[ -n "$host" ]] || host="${NODE_DOMAIN:-}"
+  [[ -n "$host" ]] || host="$(url_host_from_url "${NODE_XUI_URL:-}")"
+  [[ -n "$host" ]] || host="example.com"
+  host="${host#*://}"
+  host="${host%%/*}"
+  host="${host%%:*}"
+  printf "%s" "$host"
 }
 
 mock_kind_from_email() {
@@ -2774,6 +2807,7 @@ self_check_master_flow() {
   jq -e '
     (.inbounds | length) == 2
     and any(.inbounds[]; .tag == "akvps-aktest-vless" and .protocol == "vless" and (.streamSettings | fromjson | .security) == "reality")
+    and all(.inbounds[]; .nodeId == 7 and .shareAddrStrategy == "node" and .shareAddr == "")
     and any(.inbounds[]; .tag == "akvps-aktest-hy2hop" and .protocol == "hysteria"
       and (.streamSettings | fromjson | .finalmask.quicParams.udpHop.ports) == "39999-59999"
       and (.streamSettings | fromjson | .hysteriaSettings.finalmask.quicParams.udpHop.ports) == "39999-59999")
@@ -2784,7 +2818,15 @@ self_check_master_flow() {
   ' "$AKVPS_MOCK_STATE" >/dev/null
   verify_client_links "aktest-vless" vless >/dev/null
   verify_client_links "aktest-hy2hop" hy2hop >/dev/null
+  jq -e --arg host "$NODE_DOMAIN" '
+    (.obj | type) == "array"
+    and any(.obj[]; contains("@" + $host + ":"))' \
+    <<<"$(xui_api GET "/clients/links/aktest-vless")" >/dev/null
   client_links_are_complete "$(xui_api GET "/clients/links/aktest-hy2hop")" hy2hop "hysteria2://"
+  jq -e --arg host "$NODE_DOMAIN" '
+    (.obj | type) == "array"
+    and any(.obj[]; contains("@" + $host + ":"))' \
+    <<<"$(xui_api GET "/clients/subLinks/aktest-hy2hop-sub")" >/dev/null
 
   NODE_PROTOCOLS="hy2 / hy2端口跳跃"
   mock_state_cleanup
