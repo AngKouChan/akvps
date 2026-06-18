@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.55-mvp"
+AKVPS_VERSION="0.1.56-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1788,6 +1788,25 @@ ensure_master_inbounds() {
   }
 }
 
+verify_master_node_runtime() {
+  local payload response status xray_state msg i
+  payload="$(build_node_payload)"
+  for i in $(seq 1 6); do
+    response="$(xui_api POST "/nodes/test" "$payload")" || return 1
+    status="$(printf "%s" "$response" | jq -r '.obj.status // empty')"
+    xray_state="$(printf "%s" "$response" | jq -r '.obj.xrayState // .obj.xray.state // empty')"
+    msg="$(printf "%s" "$response" | jq -r '.obj.error // .obj.xrayError // .obj.xray.errorMsg // .msg // empty')"
+    if [[ "$status" == "online" && "$xray_state" != "failed" && "$xray_state" != "error" ]]; then
+      echo "验证通过：远端节点在线，Xray 状态正常。"
+      return 0
+    fi
+    echo "等待远端节点同步配置... $i/6"
+    sleep 5
+  done
+  echo "远端节点同步后仍未确认正常：${msg:-unknown}"
+  return 1
+}
+
 connect_node_to_master() {
   need_root
   ensure_dirs
@@ -1832,6 +1851,7 @@ connect_node_to_master() {
   [[ -n "$existing_id" ]] || die "主控列表里没有找到这个节点。" "请稍后在主控面板节点列表确认，或重新运行节点部署。"
   echo "验证通过：主控已存在节点 $NODE_NAME"
   ensure_master_inbounds || die "主控入站或客户端未完整生成。" "请查看上面的失败项；修正后可重新运行验证接入。"
+  verify_master_node_runtime || die "主控已保存配置，但远端节点未确认正常。" "请查看 3x-ui 节点错误信息，修正后重新运行验证接入。"
   master_inbound_status_lines || true
 }
 
@@ -1848,6 +1868,7 @@ verify_master_connection() {
   [[ -n "$existing_id" ]] || die "主控里没有找到当前节点。" "请先运行 3. 日常维护 -> 1. 接入主控。"
   echo "验证通过：主控已存在节点 $NODE_NAME"
   ensure_master_inbounds || die "主控入站或客户端未完整生成。" "请查看上面的失败项；修正后可重新运行验证接入。"
+  verify_master_node_runtime || die "主控已保存配置，但远端节点未确认正常。" "请查看 3x-ui 节点错误信息，修正后重新运行验证接入。"
   master_inbound_status_lines || true
 }
 
