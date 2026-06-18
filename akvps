@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.83-mvp"
+AKVPS_VERSION="0.1.84-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -2279,21 +2279,25 @@ verify_client_links() {
     return 1
   }
   echo "客户端订阅链接已生成：$email"
+  [[ "${AKVPS_MOCK_API:-0}" == "1" ]] || save_state_var "CLIENT_LINK_READY_${kind}" "1"
 }
 
 client_link_status_word() {
-  local email="$1" kind="$2" scheme response encoded_email
+  local email="$1" kind="$2" scheme response encoded_email ready_var
   scheme="$(expected_client_link_scheme "$kind")"
   [[ -n "$scheme" ]] || {
     printf "不适用"
     return
   }
+  ready_var="CLIENT_LINK_READY_${kind}"
   encoded_email="$(url_encode "$email")"
   response="$(xui_api GET "/clients/links/${encoded_email}" 2>/dev/null || true)"
   if client_links_are_complete "$response" "$kind" "$scheme"; then
     printf "已生成"
   elif printf "%s" "$response" | jq -e '.success == true' >/dev/null 2>&1; then
     printf "未生成"
+  elif [[ "${!ready_var:-0}" == "1" ]]; then
+    printf "已生成"
   else
     printf "未确认"
   fi
