@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.31-mvp"
+AKVPS_VERSION="0.1.32-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -43,6 +43,7 @@ KOMARI_SERVER_DOMAIN=""
 KOMARI_ENDPOINT=""
 KOMARI_TOKEN=""
 KOMARI_AUTO_DISCOVERY_KEY=""
+KOMARI_MONTH_ROTATE=""
 KOMARI_SERVER_NAME=""
 PUBLIC_IPV4=""
 PUBLIC_IPV6=""
@@ -139,6 +140,7 @@ load_envs() {
   KOMARI_ENDPOINT="${KOMARI_ENDPOINT:-}"
   KOMARI_TOKEN="${KOMARI_TOKEN:-}"
   KOMARI_AUTO_DISCOVERY_KEY="${KOMARI_AUTO_DISCOVERY_KEY:-}"
+  KOMARI_MONTH_ROTATE="${KOMARI_MONTH_ROTATE:-}"
   ROLE_MASTER_PANEL="${ROLE_MASTER_PANEL:-0}"
   ROLE_NODE="${ROLE_NODE:-0}"
   ROLE_KOMARI_AGENT="${ROLE_KOMARI_AGENT:-0}"
@@ -273,6 +275,9 @@ save_import_pair() {
     KOMARI_ENDPOINT|KOMARI_URL|KOMARI_SERVER_URL)
       save_config_var "KOMARI_ENDPOINT" "$value"
       ;;
+    KOMARI_MONTH_ROTATE)
+      save_config_var "KOMARI_MONTH_ROTATE" "$value"
+      ;;
     KOMARI_AUTO_DISCOVERY_KEY|KOMARI_DISCOVERY_KEY|AUTO_DISCOVERY_KEY)
       save_secret_var "KOMARI_AUTO_DISCOVERY_KEY" "$value"
       ;;
@@ -341,6 +346,7 @@ import_all_info() {
   echo "KOMARI_SERVER_DOMAIN=探针主站域名"
   echo "KOMARI_ENDPOINT=探针主站地址"
   echo "KOMARI_AUTO_DISCOVERY_KEY=Komari 自动发现密钥"
+  echo "KOMARI_MONTH_ROTATE=网络统计月重置日，0 表示禁用"
   paste_import_lines "粘贴导入"
 }
 
@@ -363,6 +369,7 @@ import_komari_info() {
   echo "KOMARI_SERVER_DOMAIN=探针主站域名"
   echo "KOMARI_ENDPOINT=探针主站地址，例如 https://status.kouzho.cc"
   echo "KOMARI_AUTO_DISCOVERY_KEY=Komari 自动发现密钥"
+  echo "KOMARI_MONTH_ROTATE=网络统计月重置日，0 表示禁用"
   paste_import_lines "粘贴导入"
 }
 
@@ -386,6 +393,7 @@ show_saved_info() {
   echo "- 探针主站域名：${KOMARI_SERVER_DOMAIN:-未设置}"
   echo "- 探针主站地址：${KOMARI_ENDPOINT:-未设置}"
   echo "- 自动发现密钥：$(mask_secret "$KOMARI_AUTO_DISCOVERY_KEY")"
+  echo "- 月重置日：${KOMARI_MONTH_ROTATE:-未设置}"
   echo
   echo "当前节点信息："
   echo "- 节点名称：${NODE_NAME:-未设置}"
@@ -1338,6 +1346,18 @@ prompt_komari() {
     done
   fi
   save_config_var "KOMARI_ENDPOINT" "$KOMARI_ENDPOINT"
+  while true; do
+    if [[ -n "$KOMARI_MONTH_ROTATE" ]]; then
+      echo "网络统计月重置日：$KOMARI_MONTH_ROTATE"
+      break
+    fi
+    read -r -p "请输入网络统计月重置日，0=禁用，1-31=每月日期: " KOMARI_MONTH_ROTATE
+    if [[ "$KOMARI_MONTH_ROTATE" =~ ^([0-9]|[12][0-9]|3[01])$ ]]; then
+      break
+    fi
+    echo "请输入 0 到 31 之间的数字。"
+  done
+  save_config_var "KOMARI_MONTH_ROTATE" "$KOMARI_MONTH_ROTATE"
   if [[ -n "$KOMARI_AUTO_DISCOVERY_KEY" ]]; then
     echo "已使用 Komari 自动发现密钥，将自动注册本机。"
     return
@@ -1357,13 +1377,13 @@ deploy_komari_agent() {
       -e "$KOMARI_ENDPOINT" \
       --auto-discovery "$KOMARI_AUTO_DISCOVERY_KEY" \
       --disable-web-ssh \
-      --month-rotate 30
+      --month-rotate "$KOMARI_MONTH_ROTATE"
   else
     bash <(curl -fsSL https://raw.githubusercontent.com/komari-monitor/komari-agent/main/install.sh) \
       -e "$KOMARI_ENDPOINT" \
       -t "$KOMARI_TOKEN" \
       --disable-web-ssh \
-      --month-rotate 30
+      --month-rotate "$KOMARI_MONTH_ROTATE"
   fi
 }
 
@@ -1389,7 +1409,7 @@ generate_komari_report() {
 | 接入密钥 | ${token_masked} |
 | 服务状态 | ${status_agent} |
 | 远程控制 | 已关闭 Web SSH / 远程命令 |
-| 网络统计月重置日 | 30 |
+| 网络统计月重置日 | ${KOMARI_MONTH_ROTATE} |
 
 EOF
   chmod 600 "$KOMARI_REPORT_PATH"
@@ -1701,6 +1721,7 @@ PANEL_API_TOKEN=${PANEL_API_TOKEN}
 KOMARI_SERVER_DOMAIN=${KOMARI_SERVER_DOMAIN}
 KOMARI_ENDPOINT=${KOMARI_ENDPOINT}
 KOMARI_AUTO_DISCOVERY_KEY=${KOMARI_AUTO_DISCOVERY_KEY}
+KOMARI_MONTH_ROTATE=${KOMARI_MONTH_ROTATE}
 END
 EOF
 }
