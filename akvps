@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.49-mvp"
+AKVPS_VERSION="0.1.50-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1266,15 +1266,28 @@ existing_inbound_stream() {
   printf "%s" "$inbound_json" | jq -c '.streamSettings' | decode_json_field
 }
 
-existing_clients_or_default() {
-  local settings="$1" default_client="$2"
-  printf "%s" "$settings" | jq -c --argjson defaultClient "$default_client" '
-    if (.clients | type) == "array" and (.clients | length) > 0 then .clients else [$defaultClient] end'
-}
-
 client_exists() {
   local email="$1"
   xui_api GET "/clients/get/${email}" 2>/dev/null | jq -e '.success == true and .obj != null' >/dev/null 2>&1
+}
+
+client_attached_to_inbound() {
+  local email="$1" inbound_id="$2"
+  xui_api GET "/clients/get/${email}" 2>/dev/null | jq -e --argjson inboundId "$inbound_id" '
+    .success == true and ((.obj.inboundIds // []) | index($inboundId)) != null' >/dev/null 2>&1
+}
+
+attach_client_to_inbound() {
+  local email="$1" inbound_id="$2" payload response msg
+  payload="$(jq -cn --argjson inboundId "$inbound_id" '{inboundIds:[$inboundId]}')"
+  response="$(xui_api POST "/clients/${email}/attach" "$payload")" || return 1
+  if printf "%s" "$response" | json_success; then
+    echo "已绑定客户端到入站：$email"
+    return 0
+  fi
+  msg="$(printf "%s" "$response" | jq -r '.msg // empty')"
+  echo "客户端绑定失败：${msg:-unknown}"
+  return 1
 }
 
 build_client_payload() {
@@ -1318,7 +1331,11 @@ ensure_master_client() {
       ;;
   esac
   if client_exists "$email"; then
-    echo "客户端已存在：$email"
+    if client_attached_to_inbound "$email" "$inbound_id"; then
+      echo "客户端已存在：$email"
+    else
+      attach_client_to_inbound "$email" "$inbound_id" || return 1
+    fi
     return 0
   fi
   payload="$(build_client_payload "$email" "$inbound_id" "$flow")"
@@ -1354,7 +1371,7 @@ build_minimal_inbound_payload() {
       [[ -n "$old_private" ]] && private_key="$old_private"
       [[ -n "$old_public" ]] && public_key="$old_public"
       [[ "$(printf "%s" "$old_short_ids" | jq 'length')" -gt 0 ]] && short_id="$(printf "%s" "$old_short_ids" | jq -r '.[0]')"
-      settings='{"clients":[],"decryption":"none","encryption":"none","fallbacks":[],"testseed":[900,500,900,256]}'
+      settings="$(printf "%s" "$old_settings" | jq -c '{clients:(.clients // []),decryption:"none",encryption:"none",fallbacks:(.fallbacks // []),testseed:(.testseed // [900,500,900,256])}')"
       stream="$(jq -cn \
         --arg privateKey "$private_key" \
         --arg publicKey "$public_key" \
@@ -1382,7 +1399,7 @@ build_minimal_inbound_payload() {
       ;;
     hy2|hy2hop)
       protocol="hysteria"
-      settings='{"version":2,"clients":[]}'
+      settings="$(printf "%s" "$old_settings" | jq -c '{version:2,clients:(.clients // [])}')"
       if [[ "$kind" == "hy2hop" ]]; then
         stream="$(jq -cn \
           --arg ports "${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}" \
@@ -2069,6 +2086,13 @@ self_check_inbounds() {
     .client.email == "aktest-vless"
     and .client.flow == "xtls-rprx-vision"
     and .inboundIds == [1]' >/dev/null
+  vless="$(build_minimal_inbound_payload 1 vless akvps-aktest-vless "aktest vless" "$AKVPS_VLESS_PORT" 7 '{"settings":{"clients":[{"email":"old","id":"old-id"}]},"streamSettings":{"realitySettings":{"privateKey":"old-private","settings":{"publicKey":"old-public"},"shortIds":["oldsid"],"target":"old.example:443","serverNames":["old.example"]}}}')"
+  printf "%s" "$vless" | jq -e '
+    (.settings | fromjson | .clients[0].email) == "old"
+    and (.streamSettings | fromjson | .realitySettings.privateKey) == "old-private"
+    and (.streamSettings | fromjson | .realitySettings.settings.publicKey) == "old-public"
+    and (.streamSettings | fromjson | .realitySettings.shortIds[0]) == "oldsid"
+    and (.streamSettings | fromjson | .realitySettings.target) == "old.example:443"' >/dev/null
   echo "入站 payload 自检通过。"
 }
 
