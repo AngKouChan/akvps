@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.78-mvp"
+AKVPS_VERSION="0.1.79-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -71,6 +71,7 @@ AKVPS_AUTO_DEPLOY=0
 AKVPS_MOCK_API=0
 AKVPS_MOCK_STATE=""
 AKVPS_MOCK_NODE_TEST_FAIL=0
+AKVPS_MOCK_NODE_TLS_ERROR=0
 
 die() {
   echo
@@ -1493,7 +1494,9 @@ xui_api_mock() {
       jq -c '{success:true,obj:.nodes}' "$AKVPS_MOCK_STATE"
       ;;
     "POST /nodes/test")
-      if [[ "${AKVPS_MOCK_NODE_TEST_FAIL:-0}" == "1" ]]; then
+      if [[ "${AKVPS_MOCK_NODE_TLS_ERROR:-0}" == "1" ]]; then
+        jq -cn '{success:true,msg:"node probe failed",obj:{status:"offline",xrayState:"unknown",xrayError:"tls: failed to verify certificate"}}'
+      elif [[ "${AKVPS_MOCK_NODE_TEST_FAIL:-0}" == "1" ]]; then
         jq -cn '{success:false,msg:"mock tls verify failed",obj:{status:"offline",xrayState:"unknown"}}'
       else
         jq -cn '{success:true,obj:{status:"online",xrayState:"running",xrayError:"",xrayVersion:"mock"}}'
@@ -1657,7 +1660,12 @@ node_tls_payload() {
   local base_payload fingerprint response test_payload
   test_payload="$(build_node_payload verify)"
   response="$(xui_api POST "/nodes/test" "$test_payload" 2>/dev/null || true)"
-  if printf "%s" "$response" | json_success; then
+  if printf "%s" "$response" | jq -e '
+    .success == true
+    and (.obj.status // "") == "online"
+    and (.obj.xrayState // .obj.xray.state // "") != "failed"
+    and (.obj.xrayState // .obj.xray.state // "") != "error"
+  ' >/dev/null 2>&1; then
     printf "%s" "$test_payload"
     return 0
   fi
@@ -3285,6 +3293,11 @@ self_check_master_flow() {
     .tlsVerifyMode == "pin" and .pinnedCertSha256 != ""
   ' >/dev/null
   AKVPS_MOCK_NODE_TEST_FAIL=0
+  AKVPS_MOCK_NODE_TLS_ERROR=1
+  node_tls_payload | jq -e '
+    .tlsVerifyMode == "pin" and .pinnedCertSha256 != ""
+  ' >/dev/null
+  AKVPS_MOCK_NODE_TLS_ERROR=0
 
   NODE_PROTOCOLS="hy2 / hy2端口跳跃"
   mock_state_cleanup
