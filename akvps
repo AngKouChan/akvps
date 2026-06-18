@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.77-mvp"
+AKVPS_VERSION="0.1.78-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -2446,7 +2446,7 @@ connect_node_to_master() {
 
   info "测试节点连通"
   local payload response status xray_state msg i
-  payload="$(build_node_payload)"
+  payload="$(node_tls_payload)"
   for i in $(seq 1 12); do
     response="$(xui_api POST "/nodes/test" "$payload")" || die "无法连接主控面板 API。" "如果上面显示 HTTP 401/403，请重新导入主控机卡片里的完整 PANEL_API_TOKEN。"
     status="$(printf "%s" "$response" | jq -r '.obj.status // empty')"
