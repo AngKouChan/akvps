@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.46-mvp"
+AKVPS_VERSION="0.1.47-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1073,8 +1073,8 @@ run_xray_x25519() {
   local bin="$1" out private public
   [[ -n "$bin" && -x "$bin" ]] || return 1
   out="$("$bin" x25519 2>/dev/null || true)"
-  private="$(printf "%s" "$out" | awk -F': *' 'tolower($1) ~ /private key/ {print $2; exit}')"
-  public="$(printf "%s" "$out" | awk -F': *' 'tolower($1) ~ /public key/ {print $2; exit}')"
+  private="$(printf "%s" "$out" | awk -F': *' 'tolower($1) ~ /private[[:space:]]*key/ || tolower($1) == "privatekey" {print $2; exit}')"
+  public="$(printf "%s" "$out" | awk -F': *' 'tolower($1) ~ /public[[:space:]]*key/ || tolower($1) ~ /publickey/ {print $2; exit}')"
   [[ -n "$private" && -n "$public" ]] || return 1
   printf "%s|%s" "$private" "$public"
 }
