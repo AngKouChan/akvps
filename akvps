@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.65-mvp"
+AKVPS_VERSION="0.1.66-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1877,6 +1877,7 @@ build_minimal_inbound_payload() {
             show:false,
             xver:0,
             target:$target,
+            dest:$target,
             serverNames:(if ($serverNames | length) > 0 then $serverNames else ["www.microsoft.com"] end),
             privateKey:$privateKey,
             minClientVer:"",
@@ -2672,6 +2673,7 @@ self_check_inbounds() {
     and (.streamSettings | fromjson | .realitySettings.privateKey) == "master-private-key"
     and (.streamSettings | fromjson | .realitySettings.settings.publicKey) == "master-public-key"
     and (.streamSettings | fromjson | .realitySettings.target) == "www.microsoft.com:443"
+    and (.streamSettings | fromjson | .realitySettings.dest) == "www.microsoft.com:443"
     and (.streamSettings | fromjson | .realitySettings.shortIds | length) == 1' >/dev/null
   printf "%s" "$hy2" | jq -e '
     .protocol == "hysteria"
@@ -2706,7 +2708,8 @@ self_check_inbounds() {
     and (.streamSettings | fromjson | .realitySettings.privateKey) == "old-private"
     and (.streamSettings | fromjson | .realitySettings.settings.publicKey) == "old-public"
     and (.streamSettings | fromjson | .realitySettings.shortIds[0]) == "oldsid"
-    and (.streamSettings | fromjson | .realitySettings.target) == "old.example:443"' >/dev/null
+    and (.streamSettings | fromjson | .realitySettings.target) == "old.example:443"
+    and (.streamSettings | fromjson | .realitySettings.dest) == "old.example:443"' >/dev/null
   hy2hop="$(build_minimal_inbound_payload 1 hy2hop akvps-aktest-hy2hop "aktest hy2端口跳跃" "$AKVPS_HY2_HOP_START" 8 '{"settings":{"clients":[{"email":"old-hy","id":"old-id"}]},"streamSettings":{"network":"hysteria","security":"tls","hysteriaSettings":{"version":2,"auth":"old-auth","udpIdleTimeout":120,"masquerade":{"type":"proxy","url":"https://old.example"},"finalmask":{"udp":[{"type":"salamander","settings":{"password":"oldpass"}}],"quicParams":{"udpHop":{"ports":"30000-40000","interval":"7-9"}}}},"tlsSettings":{"serverName":"old.example","alpn":["h3"],"fingerprint":"chrome"},"externalProxy":[{"forceTls":"same","dest":"node.example","port":443,"remark":"old"}],"finalmask":{"udp":[{"type":"salamander","settings":{"password":"oldpass"}}]}}}')"
   printf "%s" "$hy2hop" | jq -e '
     (.settings | fromjson | .clients[0].email) == "old-hy"
