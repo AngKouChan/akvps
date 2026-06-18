@@ -17,4 +17,7 @@ fi
 echo "检查版本命令..."
 bash akvps --version >/dev/null
 
+echo "检查入站 payload..."
+bash akvps check-inbounds >/dev/null
+
 echo "检查完成。"

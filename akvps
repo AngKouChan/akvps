@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.52-mvp"
+AKVPS_VERSION="0.1.53-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -139,6 +139,12 @@ load_envs() {
   NODE_XUI_URL="${NODE_XUI_URL:-}"
   NODE_XUI_API_TOKEN="${NODE_XUI_API_TOKEN:-}"
   NODE_PROTOCOLS="${NODE_PROTOCOLS:-}"
+  TUNING_MODE="${TUNING_MODE:-smart}"
+  LOCAL_DOWN_MBPS="${LOCAL_DOWN_MBPS:-1000}"
+  LOCAL_UP_MBPS="${LOCAL_UP_MBPS:-50}"
+  VPS_MBPS="${VPS_MBPS:-1000}"
+  RTT_MS="${RTT_MS:-}"
+  LINE_QUALITY="${LINE_QUALITY:-1}"
   KOMARI_SERVER_DOMAIN="${KOMARI_SERVER_DOMAIN:-}"
   KOMARI_ENDPOINT="${KOMARI_ENDPOINT:-}"
   KOMARI_TOKEN="${KOMARI_TOKEN:-}"
@@ -272,6 +278,35 @@ save_import_pair() {
     NODE_XUI_URL|NODE_URL)
       save_config_var "NODE_XUI_URL" "$value"
       ;;
+    NODE_NAME|NODE)
+      value="${value// /}"
+      value="${value,,}"
+      save_config_var "NODE_NAME" "$value"
+      ;;
+    NODE_DOMAIN)
+      save_config_var "NODE_DOMAIN" "$value"
+      ;;
+    NODE_PROTOCOLS|PROTOCOLS)
+      save_config_var "NODE_PROTOCOLS" "$value"
+      ;;
+    LOCAL_DOWN_MBPS)
+      save_config_var "LOCAL_DOWN_MBPS" "$value"
+      ;;
+    LOCAL_UP_MBPS)
+      save_config_var "LOCAL_UP_MBPS" "$value"
+      ;;
+    VPS_MBPS)
+      save_config_var "VPS_MBPS" "$value"
+      ;;
+    RTT_MS|PING_MS)
+      save_config_var "RTT_MS" "$value"
+      ;;
+    LINE_QUALITY)
+      save_config_var "LINE_QUALITY" "$value"
+      ;;
+    KOMARI_MONTH_ROTATE|MONTH_ROTATE)
+      save_config_var "KOMARI_MONTH_ROTATE" "$value"
+      ;;
     KOMARI_SERVER_DOMAIN)
       save_config_var "KOMARI_SERVER_DOMAIN" "$value"
       ;;
@@ -343,9 +378,14 @@ import_all_info() {
   echo "PANEL_DOMAIN=主控域名"
   echo "PANEL_URL=主控面板完整地址"
   echo "PANEL_API_TOKEN=3x-ui 主控 API Token"
+  echo "NODE_NAME=节点短名，例如 us1"
+  echo "NODE_PROTOCOLS=协议，例如 vless / hy2 / hy2端口跳跃 / vless / hy2端口跳跃"
+  echo "RTT_MS=本地到 VPS 延迟，例如 180"
+  echo "VPS_MBPS=VPS 标称带宽，例如 1000"
   echo "KOMARI_SERVER_DOMAIN=探针主站域名"
   echo "KOMARI_ENDPOINT=探针主站地址"
   echo "KOMARI_AUTO_DISCOVERY_KEY=Komari 自动发现密钥"
+  echo "KOMARI_MONTH_ROTATE=网络统计月重置日，0-31"
   paste_import_lines "粘贴导入"
 }
 
@@ -634,6 +674,17 @@ check_ports() {
 
 prompt_node() {
   info "节点信息"
+  if [[ -n "$NODE_NAME" ]]; then
+    NODE_NAME="${NODE_NAME// /}"
+    NODE_NAME="${NODE_NAME,,}"
+    NODE_DOMAIN="${NODE_DOMAIN:-${NODE_NAME}.${AKVPS_ROOT_DOMAIN}}"
+    valid_domain "$NODE_DOMAIN" || die "节点域名格式不正确：$NODE_DOMAIN" "请检查 NODE_NAME 或 NODE_DOMAIN。"
+    echo "节点短名：$NODE_NAME"
+    echo "节点域名：$NODE_DOMAIN"
+    save_config_var "NODE_NAME" "$NODE_NAME"
+    save_config_var "NODE_DOMAIN" "$NODE_DOMAIN"
+    return
+  fi
   while true; do
     read -r -p "请输入节点短名，例如 jp1: " NODE_NAME
     NODE_NAME="${NODE_NAME// /}"
@@ -647,6 +698,23 @@ prompt_node() {
 
 prompt_protocols() {
   info "协议准备"
+  if [[ -n "$NODE_PROTOCOLS" ]]; then
+    local proto="${NODE_PROTOCOLS,,}"
+    SELECT_VLESS=0
+    SELECT_HY2=0
+    SELECT_HY2_HOP=0
+    [[ "$proto" == *"vless"* ]] && SELECT_VLESS=1
+    if [[ "$proto" == *"hy2"* || "$proto" == *"hysteria"* ]]; then
+      SELECT_HY2=1
+    fi
+    if [[ "$proto" == *"跳跃"* || "$proto" == *"hop"* ]]; then
+      SELECT_HY2=1
+      SELECT_HY2_HOP=1
+    fi
+    [[ "$SELECT_VLESS" -eq 1 || "$SELECT_HY2" -eq 1 ]] || die "节点协议无法识别：$NODE_PROTOCOLS" "请填写 vless、hy2 或 hy2端口跳跃。"
+    echo "节点协议：$(protocol_text)"
+    return
+  fi
   echo "可多选，例如 1 2"
   echo "1. VLESS Reality"
   echo "2. Hysteria2"
@@ -816,6 +884,15 @@ setup_swap() {
 
 prompt_tuning() {
   info "调优选择"
+  if [[ "$AKVPS_AUTO_DEPLOY" == "1" && -n "$RTT_MS" ]]; then
+    TUNING_MODE="${TUNING_MODE:-smart}"
+    LOCAL_DOWN_MBPS="${LOCAL_DOWN_MBPS:-1000}"
+    LOCAL_UP_MBPS="${LOCAL_UP_MBPS:-50}"
+    VPS_MBPS="${VPS_MBPS:-1000}"
+    LINE_QUALITY="${LINE_QUALITY:-1}"
+    echo "调优：智能；VPS ${VPS_MBPS}Mbps；延迟 ${RTT_MS}ms；线路质量 ${LINE_QUALITY}"
+    return
+  fi
   read -r -p "是否启用智能调优？[Y/n] " ans
   ans="${ans:-Y}"
   if [[ "$ans" =~ ^[Nn]$ ]]; then
@@ -1293,13 +1370,13 @@ attach_client_to_inbound() {
 expected_client_link_scheme() {
   case "$1" in
     vless) printf "vless://" ;;
-    hy2|hy2hop) printf "hy2://" ;;
+    hy2|hy2hop) printf "hysteria2://" ;;
     *) printf "" ;;
   esac
 }
 
 verify_client_links() {
-  local email="$1" kind="$2" scheme response count
+  local email="$1" kind="$2" scheme response count hop_ports
   scheme="$(expected_client_link_scheme "$kind")"
   [[ -n "$scheme" ]] || return 0
   response="$(xui_api GET "/clients/links/${email}" 2>/dev/null || true)"
@@ -1307,12 +1384,21 @@ verify_client_links() {
     if .success == true and (.obj | type) == "array" then
       [.obj[] | select(type == "string" and startswith($scheme))] | length
     else 0 end' 2>/dev/null || echo 0)"
-  if [[ "$count" -gt 0 ]]; then
-    echo "客户端链接已生成：$email"
-    return 0
+  [[ "$count" -gt 0 ]] || {
+    echo "客户端链接未生成：$email"
+    return 1
+  }
+  if [[ "$kind" == "hy2hop" ]]; then
+    hop_ports="${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}"
+    printf "%s" "$response" | jq -e --arg scheme "$scheme" --arg ports "$hop_ports" '
+      .success == true
+      and (.obj | type) == "array"
+      and any(.obj[]; type == "string" and startswith($scheme) and contains("mport=" + $ports))' >/dev/null 2>&1 || {
+        echo "客户端链接缺少端口跳跃参数：$email 应包含 mport=${hop_ports}"
+        return 1
+      }
   fi
-  echo "提示：客户端已创建，但暂未取到 ${scheme} 分享链接。"
-  return 1
+  echo "客户端链接已生成：$email"
 }
 
 client_link_status_word() {
@@ -1421,14 +1507,14 @@ ensure_master_client() {
     else
       attach_client_to_inbound "$email" "$inbound_id" || return 1
     fi
-    verify_client_links "$email" "$kind" || true
+    verify_client_links "$email" "$kind" || return 1
     return 0
   fi
   payload="$(build_client_payload "$email" "$inbound_id" "$flow")"
   response="$(xui_api POST "/clients/add" "$payload")" || return 1
   if printf "%s" "$response" | json_success; then
     echo "已创建客户端：$email"
-    verify_client_links "$email" "$kind" || true
+    verify_client_links "$email" "$kind" || return 1
     return 0
   fi
   msg="$(printf "%s" "$response" | jq -r '.msg // empty')"
@@ -1552,7 +1638,11 @@ ensure_master_inbound() {
       inbound_id="$(printf "%s" "$response" | jq -r '.obj.id // empty')"
       [[ -n "$inbound_id" ]] || inbound_id="$(master_inbound_id_by_tag "$tag" 2>/dev/null || true)"
     fi
-    [[ -n "$inbound_id" ]] && ensure_master_client "$inbound_id" "$kind" || true
+    [[ -n "$inbound_id" ]] || {
+      echo "入站已保存，但无法确认入站 ID：$tag"
+      return 1
+    }
+    ensure_master_client "$inbound_id" "$kind" || return 1
     return 0
   fi
   msg="$(printf "%s" "$response" | jq -r '.msg // empty')"
@@ -1635,7 +1725,7 @@ connect_node_to_master() {
   existing_id="$(xui_api GET "/nodes/list" | jq -r --arg name "$NODE_NAME" '.obj[]? | select(.name == $name) | .id' | head -n1)" || existing_id=""
   [[ -n "$existing_id" ]] || die "主控列表里没有找到这个节点。" "请稍后在主控面板节点列表确认，或重新运行节点部署。"
   echo "验证通过：主控已存在节点 $NODE_NAME"
-  ensure_master_inbounds || true
+  ensure_master_inbounds || die "主控入站或客户端未完整生成。" "请查看上面的失败项；修正后可重新运行验证接入。"
   master_inbound_status_lines || true
 }
 
@@ -1651,7 +1741,7 @@ verify_master_connection() {
   existing_id="$(xui_api GET "/nodes/list" | jq -r --arg name "$NODE_NAME" '.obj[]? | select(.name == $name) | .id' | head -n1)" || existing_id=""
   [[ -n "$existing_id" ]] || die "主控里没有找到当前节点。" "请先运行 3. 日常维护 -> 1. 接入主控。"
   echo "验证通过：主控已存在节点 $NODE_NAME"
-  ensure_master_inbounds || true
+  ensure_master_inbounds || die "主控入站或客户端未完整生成。" "请查看上面的失败项；修正后可重新运行验证接入。"
   master_inbound_status_lines || true
 }
 
@@ -1929,14 +2019,18 @@ prompt_komari() {
     done
   fi
   save_config_var "KOMARI_ENDPOINT" "$KOMARI_ENDPOINT"
-  KOMARI_MONTH_ROTATE=""
-  while true; do
-    read -r -p "请输入网络统计月重置日，0=禁用，1-31=每月日期: " KOMARI_MONTH_ROTATE
-    if [[ "$KOMARI_MONTH_ROTATE" =~ ^([0-9]|[12][0-9]|3[01])$ ]]; then
-      break
-    fi
-    echo "请输入 0 到 31 之间的数字。"
-  done
+  if [[ -n "$KOMARI_MONTH_ROTATE" ]]; then
+    [[ "$KOMARI_MONTH_ROTATE" =~ ^([0-9]|[12][0-9]|3[01])$ ]] || die "网络统计月重置日格式不正确。" "请填写 0 到 31。"
+    echo "网络统计月重置日：$KOMARI_MONTH_ROTATE"
+  else
+    while true; do
+      read -r -p "请输入网络统计月重置日，0=禁用，1-31=每月日期: " KOMARI_MONTH_ROTATE
+      if [[ "$KOMARI_MONTH_ROTATE" =~ ^([0-9]|[12][0-9]|3[01])$ ]]; then
+        break
+      fi
+      echo "请输入 0 到 31 之间的数字。"
+    done
+  fi
   save_config_var "KOMARI_MONTH_ROTATE" "$KOMARI_MONTH_ROTATE"
   if [[ -n "$KOMARI_AUTO_DISCOVERY_KEY" ]]; then
     echo "已使用 Komari 自动发现密钥，将自动注册本机。"
@@ -2176,8 +2270,8 @@ self_check_inbounds() {
     and .client.flow == "xtls-rprx-vision"
     and .inboundIds == [1]' >/dev/null
   [[ "$(expected_client_link_scheme vless)" == "vless://" ]]
-  [[ "$(expected_client_link_scheme hy2)" == "hy2://" ]]
-  [[ "$(expected_client_link_scheme hy2hop)" == "hy2://" ]]
+  [[ "$(expected_client_link_scheme hy2)" == "hysteria2://" ]]
+  [[ "$(expected_client_link_scheme hy2hop)" == "hysteria2://" ]]
   vless="$(build_minimal_inbound_payload 1 vless akvps-aktest-vless "aktest vless" "$AKVPS_VLESS_PORT" 7 '{"settings":{"clients":[{"email":"old","id":"old-id"}]},"streamSettings":{"realitySettings":{"privateKey":"old-private","settings":{"publicKey":"old-public"},"shortIds":["oldsid"],"target":"old.example:443","serverNames":["old.example"]}}}')"
   printf "%s" "$vless" | jq -e '
     (.settings | fromjson | .clients[0].email) == "old"

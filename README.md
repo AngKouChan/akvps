@@ -71,12 +71,32 @@ akvps
 
 ## 基础设置做什么
 
-- `一键导入`：一次性粘贴通用信息，例如根域名、Cloudflare Token、主控信息、Komari 主站地址和自动发现密钥。
+- `一键导入`：一次性粘贴通用信息和节点预填信息，例如根域名、Cloudflare Token、主控信息、节点短名、节点协议、延迟、Komari 主站地址、自动发现密钥和月重置日。
 - `基础信息`：粘贴导入主控 IPv4、主控 IPv6、Cloudflare Token、根域名。
 - `主控信息`：粘贴导入 3x-ui 主控域名、面板完整地址、API Token。
 - `探针信息`：粘贴导入 Komari 主站域名和主站地址。
 - `查看信息`：查看当前配置、远端节点接入信息、面板卡片、探针卡片、主站卡片；Token 默认遮挡。
 - 敏感信息保存到 `/etc/akvps/secrets.env`，不上传 GitHub。
+
+一键导入示例：
+
+```env
+AKVPS_ROOT_DOMAIN=kouzho.cc
+CLOUDFLARE_TOKEN=你的 Cloudflare Token
+MASTER_IPV4=主控 IPv4
+MASTER_IPV6=
+PANEL_DOMAIN=x.kouzho.cc
+PANEL_URL=https://x.kouzho.cc:11123/随机路径
+PANEL_API_TOKEN=主控 API Token
+NODE_NAME=jp1
+NODE_PROTOCOLS=vless / hy2端口跳跃
+RTT_MS=180
+VPS_MBPS=1000
+KOMARI_ENDPOINT=https://status.kouzho.cc
+KOMARI_AUTO_DISCOVERY_KEY=Komari 自动发现密钥
+KOMARI_MONTH_ROTATE=1
+END
+```
 
 ## 节点部署做什么
 
@@ -92,7 +112,7 @@ akvps
 - 如果本机已经是主控面板，会直接复用主控 3x-ui，不刷新主控登录信息，也不把自己导入为远端节点。
 - 如果本机只是装过 3x-ui，会复用现有安装，避免重复安装冲突。
 - 生成本机接入报告。
-- 如果已配置主控信息，自动接入主控、验证节点在线，并按所选协议自动创建主控入站和客户端。
+- 如果已配置主控信息，自动接入主控、验证节点在线，并按所选协议自动创建主控入站和客户端；客户端分享链接未生成时会中断并提示。
 
 ## 主控面板做什么
 
@@ -113,6 +133,7 @@ akvps
 - 自动按节点协议创建或更新主控入站。
 - VLESS Reality 会通过 3x-ui 官方 API 生成 X25519 公钥 / 私钥，并创建客户端。
 - Hysteria2 会创建 Hysteria2 客户端；端口跳跃会写入 `finalmask.quicParams.udpHop.ports`。
+- 自动验证客户端分享链接；VLESS 需要 `vless://`，Hysteria2 需要 `hysteria2://`，端口跳跃还会检查 `mport`。
 - 重复运行会保留已有客户端、Reality 密钥和 Short ID；如果客户端存在但未绑定当前入站，会自动补绑定。
 - 主控机本机做代理时，不需要接入自己，直接在主控面板里创建本机入站。
 
@@ -120,7 +141,7 @@ akvps
 
 - 输入 Komari 面板地址。
 - 如果已导入 Komari 自动发现密钥，会自动注册本机，不需要手工复制节点 Token。
-- 网络统计月重置日由每台 VPS 单独填写。
+- 网络统计月重置日可在一键导入里预填，也可部署时单独填写。
 - 使用 Komari 官方 agent 安装脚本。
 - 默认关闭 Web SSH / 远程命令，只保留监控探针。
 - 输出 Komari 探针卡片。
@@ -162,4 +183,4 @@ akvps
 - Cloudflare Token，权限包含 `Zone Read` 和 `DNS Edit`，作用范围为 `kouzho.cc`。
 - 节点短名，例如 `jp1`。
 - 本地到 VPS 的大概 ping 延迟。
-- 如果使用 Komari 自动发现，只需要提前导入 Komari 主站地址和自动发现密钥；月重置日部署时单独填写。
+- 如果使用 Komari 自动发现，可以提前导入 Komari 主站地址、自动发现密钥和月重置日。
