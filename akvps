@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.13-mvp"
+AKVPS_VERSION="0.1.14-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -95,8 +95,8 @@ ensure_dirs() {
 }
 
 load_envs() {
-  [[ -f "$AKVPS_CONFIG" ]] && source "$AKVPS_CONFIG" || true
-  [[ -f "$AKVPS_SECRETS" ]] && source "$AKVPS_SECRETS" || true
+  [[ -r "$AKVPS_CONFIG" ]] && source "$AKVPS_CONFIG" || true
+  [[ -r "$AKVPS_SECRETS" ]] && source "$AKVPS_SECRETS" || true
   AKVPS_ROOT_DOMAIN="${AKVPS_ROOT_DOMAIN:-kouzho.cc}"
   MASTER_IPV4="${MASTER_IPV4:-}"
   MASTER_IPV6="${MASTER_IPV6:-}"
@@ -334,6 +334,49 @@ show_saved_info() {
   echo "- 节点域名：${NODE_DOMAIN:-未设置}"
   echo "- 节点面板地址：${NODE_XUI_URL:-未设置}"
   echo "- 节点 API Token：$(mask_secret "$NODE_XUI_API_TOKEN")"
+}
+
+status_label() {
+  if [[ -n "$1" ]]; then
+    echo "已配置"
+  else
+    echo "未配置"
+  fi
+}
+
+service_label() {
+  local service="$1"
+  if systemctl is-active --quiet "$service" 2>/dev/null; then
+    echo "运行中"
+  else
+    echo "未运行"
+  fi
+}
+
+show_dashboard() {
+  load_envs
+  local ipv4 ipv6 xui_status komari_agent_status komari_server_status roles
+  ipv4="$(curl -4 -fsS --max-time 2 https://api4.ipify.org 2>/dev/null || true)"
+  ipv6="$(curl -6 -fsS --max-time 2 https://api6.ipify.org 2>/dev/null || true)"
+  xui_status="$(service_label x-ui)"
+  komari_agent_status="$(service_label komari-agent)"
+  komari_server_status="$(service_label komari)"
+  roles=""
+  [[ -n "$PANEL_URL" ]] && roles="${roles}主控面板 "
+  [[ -n "$KOMARI_SERVER_DOMAIN" ]] && roles="${roles}探针主站 "
+  [[ -n "$NODE_XUI_URL" ]] && roles="${roles}代理节点 "
+  [[ -n "$KOMARI_TOKEN" ]] && roles="${roles}探针Agent "
+
+  echo "本机状态"
+  echo "- 本机角色：${roles:-未部署}"
+  echo "- IPv4：${ipv4:-未检测到}"
+  echo "- IPv6：${ipv6:-未检测到}"
+  echo "- 基础信息：主控IPv4 $(status_label "$MASTER_IPV4")，Cloudflare Token $(status_label "$CLOUDFLARE_TOKEN")"
+  echo "- 主控面板：$(status_label "$PANEL_URL")，3x-ui ${xui_status}"
+  echo "- 代理节点：$(status_label "$NODE_XUI_URL")"
+  echo "- 探针Agent：$(status_label "$KOMARI_TOKEN")，服务 ${komari_agent_status}"
+  echo "- 探针主站：$(status_label "$KOMARI_SERVER_DOMAIN")，服务 ${komari_server_status}"
+  echo
 }
 
 prompt_cloudflare_token() {
@@ -1496,6 +1539,7 @@ main_menu() {
     clear 2>/dev/null || true
     echo "Angkou-Vps 轻量版 akvps $AKVPS_VERSION"
     echo
+    show_dashboard
     echo "1. 基础设置"
     echo "2. 本机部署"
     echo "3. 日常维护"
