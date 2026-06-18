@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.10-mvp"
+AKVPS_VERSION="0.1.11-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -980,7 +980,7 @@ protocol_text() {
 generate_report() {
   info "生成接入报告"
   REPORT_PATH="$AKVPS_REPORT_DIR/$(date +%F-%H%M%S)-${NODE_NAME}.md"
-  local status_xui status_ufw status_dns status_ssh bbr qdisc proto_lines
+  local status_xui status_ufw status_dns status_ssh bbr qdisc proto_lines connect_block
   status_xui="$(systemctl is-active x-ui 2>/dev/null || echo unknown)"
   status_ufw="$(ufw status 2>/dev/null | head -n1 || echo unknown)"
   status_dns="A=$PUBLIC_IPV4"
@@ -992,6 +992,27 @@ generate_report() {
   [[ "$SELECT_VLESS" -eq 1 ]] && proto_lines+=$'\n'"- VLESS Reality：端口 ${AKVPS_VLESS_PORT}/tcp"
   [[ "$SELECT_HY2" -eq 1 ]] && proto_lines+=$'\n'"- Hysteria2：端口 ${AKVPS_HY2_PORT}/udp"
   [[ "$SELECT_HY2_HOP" -eq 1 ]] && proto_lines+=$'\n'"- Hysteria2 端口跳跃：${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}/udp"
+  if is_local_master_panel; then
+    connect_block="## 二、主控本机使用
+
+这台 VPS 是主控面板本机，不需要把自己导入为远端节点。
+请直接在 3x-ui 主控面板里创建本机入站。"
+  else
+    connect_block="## 二、主控添加节点
+
+| 字段 | 填写 |
+|---|---|
+| 名称 | ${NODE_NAME} |
+| 备注 | ${NODE_NAME} |
+| 协议 | https |
+| 地址 | ${NODE_DOMAIN} |
+| 端口 | ${AKVPS_XUI_PORT} |
+| 基础路径 | /${XUI_WEB_BASE_PATH}/ |
+| API Token | ${XUI_API_TOKEN} |
+| TLS 校验 | verify |
+| 入站同步 | all |
+| 允许私网地址 | false |"
+  fi
   cat > "$REPORT_PATH" <<EOF
 # akvps 代理节点报告
 
@@ -1006,20 +1027,7 @@ generate_report() {
 | 系统 | $(. /etc/os-release && echo "${PRETTY_NAME}") |
 | 协议准备 | $(protocol_text) |
 
-## 二、主控添加节点
-
-| 字段 | 填写 |
-|---|---|
-| 名称 | ${NODE_NAME} |
-| 备注 | ${NODE_NAME} |
-| 协议 | https |
-| 地址 | ${NODE_DOMAIN} |
-| 端口 | ${AKVPS_XUI_PORT} |
-| 基础路径 | /${XUI_WEB_BASE_PATH}/ |
-| API Token | ${XUI_API_TOKEN} |
-| TLS 校验 | verify |
-| 入站同步 | all |
-| 允许私网地址 | false |
+${connect_block}
 
 ## 三、主控建入站
 ${proto_lines}
@@ -1247,7 +1255,11 @@ node_deploy() {
   wait_dns
   install_or_configure_xui
   generate_report
-  if [[ -n "$PANEL_URL" && -n "$PANEL_API_TOKEN" ]]; then
+  if is_local_master_panel; then
+    echo
+    echo "提示：本机是主控面板，不自动接入自己。"
+    echo "请在 3x-ui 主控面板里直接创建本机入站。"
+  elif [[ -n "$PANEL_URL" && -n "$PANEL_API_TOKEN" ]]; then
     connect_node_to_master
   else
     echo
