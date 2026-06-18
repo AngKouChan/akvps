@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.36-mvp"
+AKVPS_VERSION="0.1.37-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -67,6 +67,7 @@ PANEL_REPORT_PATH=""
 KOMARI_REPORT_PATH=""
 KOMARI_SERVER_REPORT_PATH=""
 KOMARI_SERVER_REUSED=0
+AKVPS_AUTO_DEPLOY=0
 
 die() {
   echo
@@ -217,6 +218,12 @@ mask_secret() {
 
 prompt_config() {
   info "读取基础配置"
+  if [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
+    [[ -n "$MASTER_IPV4" && "$MASTER_IPV4" != "未设置" && "$MASTER_IPV4" != "留空" ]] || die "缺少主控 IPv4。" "请在一键导入里填写 MASTER_IPV4。"
+    valid_ipv4 "$MASTER_IPV4" || die "主控 IPv4 格式不正确：$MASTER_IPV4" "请检查一键导入里的 MASTER_IPV4。"
+    prompt_cloudflare_token
+    return
+  fi
   while [[ -z "$MASTER_IPV4" ]] || ! valid_ipv4 "$MASTER_IPV4"; do
     read -r -p "请输入主控 IPv4: " MASTER_IPV4
   done
@@ -273,6 +280,24 @@ save_import_pair() {
       ;;
     NODE_PROTOCOLS|NODE_TYPE)
       save_config_var "NODE_PROTOCOLS" "$value"
+      ;;
+    TUNING_MODE)
+      save_config_var "TUNING_MODE" "$value"
+      ;;
+    LOCAL_DOWN_MBPS)
+      save_config_var "LOCAL_DOWN_MBPS" "$value"
+      ;;
+    LOCAL_UP_MBPS)
+      save_config_var "LOCAL_UP_MBPS" "$value"
+      ;;
+    VPS_MBPS)
+      save_config_var "VPS_MBPS" "$value"
+      ;;
+    RTT_MS)
+      save_config_var "RTT_MS" "$value"
+      ;;
+    LINE_QUALITY)
+      save_config_var "LINE_QUALITY" "$value"
       ;;
     KOMARI_SERVER_DOMAIN)
       save_config_var "KOMARI_SERVER_DOMAIN" "$value"
@@ -351,6 +376,11 @@ import_all_info() {
   echo "KOMARI_SERVER_DOMAIN=探针主站域名"
   echo "KOMARI_ENDPOINT=探针主站地址"
   echo "KOMARI_AUTO_DISCOVERY_KEY=Komari 自动发现密钥"
+  echo "NODE_NAME=本机节点短名"
+  echo "NODE_PROTOCOLS=vless / hy2 / hy2端口跳跃"
+  echo "RTT_MS=本地到 VPS 延迟，例如 135"
+  echo "LINE_QUALITY=线路质量，1稳定 2波动 3丢包明显"
+  echo "KOMARI_MONTH_ROTATE=探针月重置日，0到31"
   paste_import_lines "粘贴导入"
 }
 
@@ -551,6 +581,9 @@ prompt_cloudflare_token() {
     echo "Cloudflare Token 可用。"
     return
   fi
+  if [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
+    die "Cloudflare Token 不可用。" "请在一键导入里填写有效的 CLOUDFLARE_TOKEN。"
+  fi
   while true; do
     read -r -s -p "请输入 Cloudflare Token: " CLOUDFLARE_TOKEN
     echo
@@ -636,6 +669,19 @@ check_ports() {
 
 prompt_node() {
   info "节点信息"
+  if [[ "$AKVPS_AUTO_DEPLOY" == "1" && -n "$NODE_NAME" ]]; then
+    NODE_NAME="${NODE_NAME// /}"
+    NODE_NAME="${NODE_NAME,,}"
+    NODE_DOMAIN="${NODE_DOMAIN:-${NODE_NAME}.${AKVPS_ROOT_DOMAIN}}"
+    valid_domain "$NODE_DOMAIN" || die "节点域名不正确：$NODE_DOMAIN" "请检查一键导入里的 NODE_NAME 或 NODE_DOMAIN。"
+    echo "节点域名：$NODE_DOMAIN"
+    save_config_var "NODE_NAME" "$NODE_NAME"
+    save_config_var "NODE_DOMAIN" "$NODE_DOMAIN"
+    return
+  fi
+  if [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
+    die "缺少节点短名。" "请在一键导入里填写 NODE_NAME。"
+  fi
   while true; do
     read -r -p "请输入节点短名，例如 jp1: " NODE_NAME
     NODE_NAME="${NODE_NAME// /}"
@@ -649,6 +695,21 @@ prompt_node() {
 
 prompt_protocols() {
   info "协议准备"
+  if [[ "$AKVPS_AUTO_DEPLOY" == "1" && -n "$NODE_PROTOCOLS" ]]; then
+    local proto="${NODE_PROTOCOLS,,}"
+    SELECT_VLESS=0
+    SELECT_HY2=0
+    SELECT_HY2_HOP=0
+    [[ "$proto" == *"vless"* ]] && SELECT_VLESS=1
+    [[ "$proto" == *"hy2"* || "$proto" == *"hysteria"* ]] && SELECT_HY2=1
+    [[ "$proto" == *"hop"* || "$proto" == *"跳跃"* ]] && SELECT_HY2=1 && SELECT_HY2_HOP=1
+    [[ "$SELECT_VLESS" -eq 1 || "$SELECT_HY2" -eq 1 ]] || die "节点协议不正确：$NODE_PROTOCOLS" "请填写 vless、hy2 或 hy2端口跳跃。"
+    echo "已选择：$(protocol_short_text)"
+    return
+  fi
+  if [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
+    die "缺少节点协议。" "请在一键导入里填写 NODE_PROTOCOLS，例如 vless 或 hy2端口跳跃。"
+  fi
   echo "可多选，例如 1 2"
   echo "1. VLESS Reality"
   echo "2. Hysteria2"
@@ -793,6 +854,15 @@ setup_swap() {
     echo "内存大于 4G，默认不创建 Swap。"
     return
   fi
+  if [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
+    echo "一键部署：自动创建 1G Swap。"
+    fallocate -l 1G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=1024
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+    grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    return
+  fi
   read -r -p "建议创建 1G Swap，是否创建？[Y/n] " ans
   ans="${ans:-Y}"
   [[ "$ans" =~ ^[Yy]$ ]] || return
@@ -805,6 +875,20 @@ setup_swap() {
 
 prompt_tuning() {
   info "调优选择"
+  if [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
+    TUNING_MODE="${TUNING_MODE:-smart}"
+    LOCAL_DOWN_MBPS="${LOCAL_DOWN_MBPS:-1000}"
+    LOCAL_UP_MBPS="${LOCAL_UP_MBPS:-50}"
+    VPS_MBPS="${VPS_MBPS:-1000}"
+    LINE_QUALITY="${LINE_QUALITY:-1}"
+    [[ -n "$RTT_MS" ]] || die "缺少延迟信息。" "请在一键导入里填写 RTT_MS，例如 135。"
+    echo "调优模式：$TUNING_MODE"
+    echo "本地下载/上传：${LOCAL_DOWN_MBPS}/${LOCAL_UP_MBPS} Mbps"
+    echo "VPS 标称：${VPS_MBPS} Mbps"
+    echo "平均延迟：${RTT_MS} ms"
+    echo "线路质量：$LINE_QUALITY"
+    return
+  fi
   read -r -p "是否启用智能调优？[Y/n] " ans
   ans="${ans:-Y}"
   if [[ "$ans" =~ ^[Nn]$ ]]; then
@@ -1449,18 +1533,26 @@ prompt_komari() {
     done
   fi
   save_config_var "KOMARI_ENDPOINT" "$KOMARI_ENDPOINT"
-  KOMARI_MONTH_ROTATE=""
-  while true; do
-    read -r -p "请输入网络统计月重置日，0=禁用，1-31=每月日期: " KOMARI_MONTH_ROTATE
-    if [[ "$KOMARI_MONTH_ROTATE" =~ ^([0-9]|[12][0-9]|3[01])$ ]]; then
-      break
-    fi
-    echo "请输入 0 到 31 之间的数字。"
-  done
+  if [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
+    [[ "$KOMARI_MONTH_ROTATE" =~ ^([0-9]|[12][0-9]|3[01])$ ]] || die "缺少探针月重置日。" "请在一键导入里填写 KOMARI_MONTH_ROTATE，0 到 31。"
+    echo "网络统计月重置日：$KOMARI_MONTH_ROTATE"
+  else
+    KOMARI_MONTH_ROTATE=""
+    while true; do
+      read -r -p "请输入网络统计月重置日，0=禁用，1-31=每月日期: " KOMARI_MONTH_ROTATE
+      if [[ "$KOMARI_MONTH_ROTATE" =~ ^([0-9]|[12][0-9]|3[01])$ ]]; then
+        break
+      fi
+      echo "请输入 0 到 31 之间的数字。"
+    done
+  fi
   save_config_var "KOMARI_MONTH_ROTATE" "$KOMARI_MONTH_ROTATE"
   if [[ -n "$KOMARI_AUTO_DISCOVERY_KEY" ]]; then
     echo "已使用 Komari 自动发现密钥，将自动注册本机。"
     return
+  fi
+  if [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
+    die "缺少 Komari 自动发现密钥。" "请在一键导入里填写 KOMARI_AUTO_DISCOVERY_KEY。"
   fi
   echo "未配置 Komari 自动发现密钥，将使用手动 Token 方式。"
   while [[ -z "$KOMARI_TOKEN" ]]; do
@@ -1702,6 +1794,9 @@ node_deploy() {
     echo "提示：主控信息未配置，已跳过一键接入主控。"
     echo "需要时可到 1. 基础设置 -> 3. 主控信息 导入后重新运行节点部署。"
   fi
+  if [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
+    return 0
+  fi
   if [[ "$ROLE_KOMARI_AGENT" != "1" && -n "$KOMARI_ENDPOINT" ]]; then
     echo
     read -r -p "是否继续部署探针节点？[y/N] " ans
@@ -1709,6 +1804,64 @@ node_deploy() {
       deploy_komari
     fi
   fi
+}
+
+simple_status_word() {
+  local ok="$1"
+  if [[ "$ok" == "1" ]]; then
+    echo "已完成"
+  else
+    echo "未完成"
+  fi
+}
+
+show_simple_deploy_report() {
+  ensure_dirs
+  load_envs
+  local xui_status komari_status master_status komari_status_word tuning_status
+  xui_status="$(systemctl is-active x-ui 2>/dev/null || echo unknown)"
+  komari_status="$(systemctl is-active komari-agent 2>/dev/null || echo unknown)"
+  tuning_status="$(tuning_status_text)"
+  if [[ -n "$PANEL_URL" && -n "$PANEL_API_TOKEN" && -n "$NODE_NAME" ]]; then
+    if xui_api GET "/nodes/list" 2>/dev/null | jq -e --arg name "$NODE_NAME" '.obj[]? | select(.name == $name)' >/dev/null 2>&1; then
+      master_status="已完成"
+    else
+      master_status="未确认"
+    fi
+  else
+    master_status="未配置"
+  fi
+  [[ "$ROLE_KOMARI_AGENT" == "1" && "$komari_status" == "active" ]] && komari_status_word="已完成" || komari_status_word="未完成"
+
+  info "极简报告"
+  echo "- 节点域名：${NODE_DOMAIN:-未设置}"
+  echo "- 节点类型：$(node_protocols_text)"
+  echo "- 主控接入：$master_status"
+  echo "- 探针接入：$komari_status_word"
+  echo "- 运行服务：3X-UI ${xui_status} / Komari ${komari_status}"
+  echo "- 调优状态：$tuning_status"
+}
+
+one_click_deploy() {
+  need_root
+  ensure_dirs
+  AKVPS_AUTO_DEPLOY=1
+  info "一键部署"
+  echo "流程：信息注入 -> 代理节点 -> 探针节点 -> 极简报告"
+  echo
+  import_all_info
+  load_envs
+  node_deploy
+  load_envs
+  if [[ -n "$KOMARI_ENDPOINT" ]]; then
+    deploy_komari
+  else
+    echo
+    echo "提示：未配置探针主站地址，已跳过探针节点。"
+  fi
+  load_envs
+  show_simple_deploy_report
+  AKVPS_AUTO_DEPLOY=0
 }
 
 local_deploy_menu() {
@@ -1832,6 +1985,11 @@ PANEL_API_TOKEN=${PANEL_API_TOKEN}
 KOMARI_SERVER_DOMAIN=${KOMARI_SERVER_DOMAIN}
 KOMARI_ENDPOINT=${KOMARI_ENDPOINT}
 KOMARI_AUTO_DISCOVERY_KEY=${KOMARI_AUTO_DISCOVERY_KEY}
+NODE_NAME=
+NODE_PROTOCOLS=
+RTT_MS=
+LINE_QUALITY=1
+KOMARI_MONTH_ROTATE=
 END
 EOF
 }
@@ -1944,18 +2102,20 @@ main_menu() {
     echo "Angkou-Vps 轻量版 akvps $AKVPS_VERSION"
     echo
     show_dashboard
-    echo "1. 基础设置"
-    echo "2. 本机部署"
-    echo "3. 日常维护"
-    echo "4. 更新 / 卸载"
+    echo "1. 一键部署"
+    echo "2. 基础设置"
+    echo "3. 本机部署"
+    echo "4. 日常维护"
+    echo "5. 更新 / 卸载"
     echo "q. 退出"
     echo
     read -r -p "请选择: " choice
     case "$choice" in
-      1) basic_settings_menu ;;
-      2) local_deploy_menu ;;
-      3) maintenance_menu ;;
-      4) updates_menu ;;
+      1) one_click_deploy; pause_menu ;;
+      2) basic_settings_menu ;;
+      3) local_deploy_menu ;;
+      4) maintenance_menu ;;
+      5) updates_menu ;;
       q|Q) exit 0 ;;
     esac
   done
@@ -1965,6 +2125,7 @@ case "${1:-menu}" in
   --version|-v|version) version ;;
   check|self-check) self_check ;;
   menu) main_menu ;;
+  one-click|one-click-deploy) one_click_deploy ;;
   init|initial-setup|node|node-deploy) node_deploy ;;
   panel|deploy-panel|local-deploy) local_deploy_menu ;;
   komari|deploy-komari) deploy_komari ;;
