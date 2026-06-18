@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.53-mvp"
+AKVPS_VERSION="0.1.54-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1375,45 +1375,46 @@ expected_client_link_scheme() {
   esac
 }
 
-verify_client_links() {
-  local email="$1" kind="$2" scheme response count hop_ports
-  scheme="$(expected_client_link_scheme "$kind")"
-  [[ -n "$scheme" ]] || return 0
-  response="$(xui_api GET "/clients/links/${email}" 2>/dev/null || true)"
-  count="$(printf "%s" "$response" | jq -r --arg scheme "$scheme" '
-    if .success == true and (.obj | type) == "array" then
-      [.obj[] | select(type == "string" and startswith($scheme))] | length
-    else 0 end' 2>/dev/null || echo 0)"
-  [[ "$count" -gt 0 ]] || {
-    echo "客户端链接未生成：$email"
-    return 1
-  }
+client_links_are_complete() {
+  local response="$1" kind="$2" scheme="$3" hop_ports
+  printf "%s" "$response" | jq -e --arg scheme "$scheme" '
+    .success == true
+    and (.obj | type) == "array"
+    and any(.obj[]; type == "string" and startswith($scheme))' >/dev/null 2>&1 || return 1
   if [[ "$kind" == "hy2hop" ]]; then
     hop_ports="${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}"
     printf "%s" "$response" | jq -e --arg scheme "$scheme" --arg ports "$hop_ports" '
       .success == true
       and (.obj | type) == "array"
-      and any(.obj[]; type == "string" and startswith($scheme) and contains("mport=" + $ports))' >/dev/null 2>&1 || {
-        echo "客户端链接缺少端口跳跃参数：$email 应包含 mport=${hop_ports}"
-        return 1
-      }
+      and any(.obj[]; type == "string" and startswith($scheme) and contains("mport=" + $ports))' >/dev/null 2>&1 || return 1
   fi
+}
+
+verify_client_links() {
+  local email="$1" kind="$2" scheme response hop_ports
+  scheme="$(expected_client_link_scheme "$kind")"
+  [[ -n "$scheme" ]] || return 0
+  response="$(xui_api GET "/clients/links/${email}" 2>/dev/null || true)"
+  client_links_are_complete "$response" "$kind" "$scheme" || {
+    echo "客户端链接未生成：$email"
+    if [[ "$kind" == "hy2hop" ]]; then
+      hop_ports="${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}"
+      echo "端口跳跃链接还应包含：mport=${hop_ports}"
+    fi
+    return 1
+  }
   echo "客户端链接已生成：$email"
 }
 
 client_link_status_word() {
-  local email="$1" kind="$2" scheme response count
+  local email="$1" kind="$2" scheme response
   scheme="$(expected_client_link_scheme "$kind")"
   [[ -n "$scheme" ]] || {
     printf "不适用"
     return
   }
   response="$(xui_api GET "/clients/links/${email}" 2>/dev/null || true)"
-  count="$(printf "%s" "$response" | jq -r --arg scheme "$scheme" '
-    if .success == true and (.obj | type) == "array" then
-      [.obj[] | select(type == "string" and startswith($scheme))] | length
-    else 0 end' 2>/dev/null || echo 0)"
-  if [[ "$count" -gt 0 ]]; then
+  if client_links_are_complete "$response" "$kind" "$scheme"; then
     printf "已生成"
   else
     printf "未生成"
@@ -1575,10 +1576,49 @@ build_minimal_inbound_payload() {
       settings="$(printf "%s" "$old_settings" | jq -c '{version:2,clients:(.clients // [])}')"
       if [[ "$kind" == "hy2hop" ]]; then
         stream="$(jq -cn \
+          --argjson old "$old_stream" \
           --arg ports "${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}" \
-          '{network:"hysteria",security:"tls",hysteriaSettings:{version:2,auth:"",udpIdleTimeout:60,masquerade:{type:"",dir:"",url:"",rewriteHost:false,insecure:false,content:"",headers:{},statusCode:0}},tlsSettings:{serverName:"",alpn:["h3"],fingerprint:"",echConfigList:"",verifyPeerCertByName:"",pinnedPeerCertSha256:""},finalmask:{quicParams:{udpHop:{ports:$ports,interval:"5-10"}}}}')"
+          '$old
+          + {
+            network:"hysteria",
+            security:($old.security // "tls"),
+            hysteriaSettings:(($old.hysteriaSettings // {}) + {
+              version:2,
+              auth:($old.hysteriaSettings.auth // ""),
+              udpIdleTimeout:($old.hysteriaSettings.udpIdleTimeout // 60),
+              masquerade:($old.hysteriaSettings.masquerade // {type:"",dir:"",url:"",rewriteHost:false,insecure:false,content:"",headers:{},statusCode:0}),
+              finalmask:(
+                ($old.hysteriaSettings.finalmask // {})
+                * {quicParams:{udpHop:{
+                  ports:$ports,
+                  interval:($old.hysteriaSettings.finalmask.quicParams.udpHop.interval // $old.finalmask.quicParams.udpHop.interval // "5-10")
+                }}}
+              )
+            }),
+            tlsSettings:($old.tlsSettings // {serverName:"",alpn:["h3"],fingerprint:"",echConfigList:"",verifyPeerCertByName:"",pinnedPeerCertSha256:""}),
+            finalmask:(
+              ($old.finalmask // {})
+              * {quicParams:{udpHop:{
+                ports:$ports,
+                interval:($old.finalmask.quicParams.udpHop.interval // $old.hysteriaSettings.finalmask.quicParams.udpHop.interval // "5-10")
+              }}}
+            )
+          }')"
       else
-        stream='{ "network":"hysteria","security":"tls","hysteriaSettings":{"version":2,"auth":"","udpIdleTimeout":60,"masquerade":{"type":"","dir":"","url":"","rewriteHost":false,"insecure":false,"content":"","headers":{},"statusCode":0}},"tlsSettings":{"serverName":"","alpn":["h3"],"fingerprint":"","echConfigList":"","verifyPeerCertByName":"","pinnedPeerCertSha256":""} }'
+        stream="$(jq -cn \
+          --argjson old "$old_stream" \
+          '$old
+          + {
+            network:"hysteria",
+            security:($old.security // "tls"),
+            hysteriaSettings:(($old.hysteriaSettings // {}) + {
+              version:2,
+              auth:($old.hysteriaSettings.auth // ""),
+              udpIdleTimeout:($old.hysteriaSettings.udpIdleTimeout // 60),
+              masquerade:($old.hysteriaSettings.masquerade // {type:"",dir:"",url:"",rewriteHost:false,insecure:false,content:"",headers:{},statusCode:0})
+            }),
+            tlsSettings:($old.tlsSettings // {serverName:"",alpn:["h3"],fingerprint:"",echConfigList:"",verifyPeerCertByName:"",pinnedPeerCertSha256:""})
+          }')"
       fi
       ;;
     *)
@@ -2264,7 +2304,8 @@ self_check_inbounds() {
     and (.streamSettings | fromjson | .network) == "hysteria"
     and (.streamSettings | fromjson | .security) == "tls"' >/dev/null
   printf "%s" "$hy2hop" | jq -e '
-    (.streamSettings | fromjson | .finalmask.quicParams.udpHop.ports) == "39999-59999"' >/dev/null
+    (.streamSettings | fromjson | .finalmask.quicParams.udpHop.ports) == "39999-59999"
+    and (.streamSettings | fromjson | .hysteriaSettings.finalmask.quicParams.udpHop.ports) == "39999-59999"' >/dev/null
   build_client_payload "aktest-vless" 1 "xtls-rprx-vision" | jq -e '
     .client.email == "aktest-vless"
     and .client.flow == "xtls-rprx-vision"
@@ -2272,6 +2313,8 @@ self_check_inbounds() {
   [[ "$(expected_client_link_scheme vless)" == "vless://" ]]
   [[ "$(expected_client_link_scheme hy2)" == "hysteria2://" ]]
   [[ "$(expected_client_link_scheme hy2hop)" == "hysteria2://" ]]
+  client_links_are_complete '{"success":true,"obj":["hysteria2://example?mport=39999-59999"]}' hy2hop "hysteria2://"
+  ! client_links_are_complete '{"success":true,"obj":["hysteria2://example"]}' hy2hop "hysteria2://"
   vless="$(build_minimal_inbound_payload 1 vless akvps-aktest-vless "aktest vless" "$AKVPS_VLESS_PORT" 7 '{"settings":{"clients":[{"email":"old","id":"old-id"}]},"streamSettings":{"realitySettings":{"privateKey":"old-private","settings":{"publicKey":"old-public"},"shortIds":["oldsid"],"target":"old.example:443","serverNames":["old.example"]}}}')"
   printf "%s" "$vless" | jq -e '
     (.settings | fromjson | .clients[0].email) == "old"
@@ -2279,6 +2322,19 @@ self_check_inbounds() {
     and (.streamSettings | fromjson | .realitySettings.settings.publicKey) == "old-public"
     and (.streamSettings | fromjson | .realitySettings.shortIds[0]) == "oldsid"
     and (.streamSettings | fromjson | .realitySettings.target) == "old.example:443"' >/dev/null
+  hy2hop="$(build_minimal_inbound_payload 1 hy2hop akvps-aktest-hy2hop "aktest hy2端口跳跃" "$AKVPS_HY2_HOP_START" 8 '{"settings":{"clients":[{"email":"old-hy","id":"old-id"}]},"streamSettings":{"network":"hysteria","security":"tls","hysteriaSettings":{"version":2,"auth":"old-auth","udpIdleTimeout":120,"masquerade":{"type":"proxy","url":"https://old.example"},"finalmask":{"udp":[{"type":"salamander","settings":{"password":"oldpass"}}],"quicParams":{"udpHop":{"ports":"30000-40000","interval":"7-9"}}}},"tlsSettings":{"serverName":"old.example","alpn":["h3"],"fingerprint":"chrome"},"externalProxy":[{"forceTls":"same","dest":"node.example","port":443,"remark":"old"}],"finalmask":{"udp":[{"type":"salamander","settings":{"password":"oldpass"}}]}}}')"
+  printf "%s" "$hy2hop" | jq -e '
+    (.settings | fromjson | .clients[0].email) == "old-hy"
+    and (.streamSettings | fromjson | .hysteriaSettings.auth) == "old-auth"
+    and (.streamSettings | fromjson | .hysteriaSettings.udpIdleTimeout) == 120
+    and (.streamSettings | fromjson | .hysteriaSettings.masquerade.type) == "proxy"
+    and (.streamSettings | fromjson | .tlsSettings.serverName) == "old.example"
+    and (.streamSettings | fromjson | .externalProxy[0].dest) == "node.example"
+    and (.streamSettings | fromjson | .finalmask.udp[0].settings.password) == "oldpass"
+    and (.streamSettings | fromjson | .finalmask.quicParams.udpHop.ports) == "39999-59999"
+    and (.streamSettings | fromjson | .finalmask.quicParams.udpHop.interval) == "7-9"
+    and (.streamSettings | fromjson | .hysteriaSettings.finalmask.udp[0].settings.password) == "oldpass"
+    and (.streamSettings | fromjson | .hysteriaSettings.finalmask.quicParams.udpHop.ports) == "39999-59999"' >/dev/null
   echo "入站 payload 自检通过。"
 }
 
