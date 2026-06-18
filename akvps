@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.30-mvp"
+AKVPS_VERSION="0.1.31-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -42,6 +42,7 @@ NODE_XUI_API_TOKEN=""
 KOMARI_SERVER_DOMAIN=""
 KOMARI_ENDPOINT=""
 KOMARI_TOKEN=""
+KOMARI_AUTO_DISCOVERY_KEY=""
 KOMARI_SERVER_NAME=""
 PUBLIC_IPV4=""
 PUBLIC_IPV6=""
@@ -137,6 +138,7 @@ load_envs() {
   KOMARI_SERVER_DOMAIN="${KOMARI_SERVER_DOMAIN:-}"
   KOMARI_ENDPOINT="${KOMARI_ENDPOINT:-}"
   KOMARI_TOKEN="${KOMARI_TOKEN:-}"
+  KOMARI_AUTO_DISCOVERY_KEY="${KOMARI_AUTO_DISCOVERY_KEY:-}"
   ROLE_MASTER_PANEL="${ROLE_MASTER_PANEL:-0}"
   ROLE_NODE="${ROLE_NODE:-0}"
   ROLE_KOMARI_AGENT="${ROLE_KOMARI_AGENT:-0}"
@@ -271,6 +273,9 @@ save_import_pair() {
     KOMARI_ENDPOINT|KOMARI_URL|KOMARI_SERVER_URL)
       save_config_var "KOMARI_ENDPOINT" "$value"
       ;;
+    KOMARI_AUTO_DISCOVERY_KEY|KOMARI_DISCOVERY_KEY|AUTO_DISCOVERY_KEY)
+      save_secret_var "KOMARI_AUTO_DISCOVERY_KEY" "$value"
+      ;;
     CLOUDFLARE_TOKEN|CF_TOKEN)
       save_secret_var "CLOUDFLARE_TOKEN" "$value"
       ;;
@@ -335,6 +340,7 @@ import_all_info() {
   echo "PANEL_API_TOKEN=3x-ui 主控 API Token"
   echo "KOMARI_SERVER_DOMAIN=探针主站域名"
   echo "KOMARI_ENDPOINT=探针主站地址"
+  echo "KOMARI_AUTO_DISCOVERY_KEY=Komari 自动发现密钥"
   paste_import_lines "粘贴导入"
 }
 
@@ -356,6 +362,7 @@ import_komari_info() {
   echo "可用字段："
   echo "KOMARI_SERVER_DOMAIN=探针主站域名"
   echo "KOMARI_ENDPOINT=探针主站地址，例如 https://status.kouzho.cc"
+  echo "KOMARI_AUTO_DISCOVERY_KEY=Komari 自动发现密钥"
   paste_import_lines "粘贴导入"
 }
 
@@ -378,6 +385,7 @@ show_saved_info() {
   echo "探针信息："
   echo "- 探针主站域名：${KOMARI_SERVER_DOMAIN:-未设置}"
   echo "- 探针主站地址：${KOMARI_ENDPOINT:-未设置}"
+  echo "- 自动发现密钥：$(mask_secret "$KOMARI_AUTO_DISCOVERY_KEY")"
   echo
   echo "当前节点信息："
   echo "- 节点名称：${NODE_NAME:-未设置}"
@@ -670,7 +678,8 @@ update_komari_agent() {
   need_root
   ensure_dirs
   load_envs
-  [[ -n "$KOMARI_ENDPOINT" && -n "$KOMARI_TOKEN" ]] || die "缺少 Komari 探针信息。" "请先运行 2. 本机部署 -> 2. 探针Agent。"
+  [[ -n "$KOMARI_ENDPOINT" ]] || die "缺少 Komari 主站地址。" "请先到 1. 基础设置 -> 4. 探针信息 导入 KOMARI_ENDPOINT。"
+  [[ -n "$KOMARI_AUTO_DISCOVERY_KEY" || -n "$KOMARI_TOKEN" ]] || die "缺少 Komari 接入密钥。" "请先导入 KOMARI_AUTO_DISCOVERY_KEY，或运行探针Agent手动输入 Token。"
   deploy_komari_agent
   systemctl restart komari-agent 2>/dev/null || true
   verify_komari_agent
@@ -1328,37 +1337,59 @@ prompt_komari() {
       echo "地址格式不正确，请以 http:// 或 https:// 开头。"
     done
   fi
+  save_config_var "KOMARI_ENDPOINT" "$KOMARI_ENDPOINT"
+  if [[ -n "$KOMARI_AUTO_DISCOVERY_KEY" ]]; then
+    echo "已使用 Komari 自动发现密钥，将自动注册本机。"
+    return
+  fi
+  echo "未配置 Komari 自动发现密钥，将使用手动 Token 方式。"
   while [[ -z "$KOMARI_TOKEN" ]]; do
     read -r -s -p "请输入 Komari 节点 Token: " KOMARI_TOKEN
     echo
   done
-  save_config_var "KOMARI_ENDPOINT" "$KOMARI_ENDPOINT"
   save_secret_var "KOMARI_TOKEN" "$KOMARI_TOKEN"
 }
 
 deploy_komari_agent() {
   info "安装 Komari 探针"
-  bash <(curl -fsSL https://raw.githubusercontent.com/komari-monitor/komari-agent/main/install.sh) \
-    -e "$KOMARI_ENDPOINT" \
-    -t "$KOMARI_TOKEN" \
-    --disable-web-ssh
+  if [[ -n "$KOMARI_AUTO_DISCOVERY_KEY" ]]; then
+    bash <(curl -fsSL https://raw.githubusercontent.com/komari-monitor/komari-agent/main/install.sh) \
+      -e "$KOMARI_ENDPOINT" \
+      --auto-discovery "$KOMARI_AUTO_DISCOVERY_KEY" \
+      --disable-web-ssh \
+      --month-rotate 30
+  else
+    bash <(curl -fsSL https://raw.githubusercontent.com/komari-monitor/komari-agent/main/install.sh) \
+      -e "$KOMARI_ENDPOINT" \
+      -t "$KOMARI_TOKEN" \
+      --disable-web-ssh \
+      --month-rotate 30
+  fi
 }
 
 generate_komari_report() {
   info "生成 Komari 探针卡片"
   KOMARI_REPORT_PATH="$AKVPS_REPORT_DIR/$(date +%F-%H%M%S)-komari-agent.md"
-  local status_agent token_masked
+  local status_agent token_masked mode
   status_agent="$(systemctl is-active komari-agent 2>/dev/null || echo unknown)"
-  token_masked="${KOMARI_TOKEN:0:6}******${KOMARI_TOKEN: -4}"
+  if [[ -n "$KOMARI_AUTO_DISCOVERY_KEY" ]]; then
+    mode="自动发现"
+    token_masked="$(mask_secret "$KOMARI_AUTO_DISCOVERY_KEY")"
+  else
+    mode="手动 Token"
+    token_masked="$(mask_secret "$KOMARI_TOKEN")"
+  fi
   cat > "$KOMARI_REPORT_PATH" <<EOF
 # akvps Komari 探针卡片
 
 | 项目 | 内容 |
 |---|---|
 | Komari 面板 | ${KOMARI_ENDPOINT} |
-| Token | ${token_masked} |
+| 接入方式 | ${mode} |
+| 接入密钥 | ${token_masked} |
 | 服务状态 | ${status_agent} |
 | 远程控制 | 已关闭 Web SSH / 远程命令 |
+| 网络统计月重置日 | 30 |
 
 EOF
   chmod 600 "$KOMARI_REPORT_PATH"
@@ -1669,6 +1700,7 @@ PANEL_URL=${PANEL_URL}
 PANEL_API_TOKEN=${PANEL_API_TOKEN}
 KOMARI_SERVER_DOMAIN=${KOMARI_SERVER_DOMAIN}
 KOMARI_ENDPOINT=${KOMARI_ENDPOINT}
+KOMARI_AUTO_DISCOVERY_KEY=${KOMARI_AUTO_DISCOVERY_KEY}
 END
 EOF
 }
