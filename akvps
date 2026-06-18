@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.61-mvp"
+AKVPS_VERSION="0.1.62-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -109,6 +109,10 @@ color_text() {
 
 lower_text() {
   printf "%s" "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+url_encode() {
+  jq -nr --arg v "$1" '$v|@uri'
 }
 
 pause_menu() {
@@ -546,6 +550,45 @@ node_protocols_text() {
   fi
 }
 
+parse_protocols() {
+  local proto="${1:-}" normalized item
+  proto="$(lower_text "$proto")"
+  normalized="$(printf "%s" "$proto" | sed 's#[/,+;|，、；]# #g')"
+  SELECT_VLESS=0
+  SELECT_HY2=0
+  SELECT_HY2_HOP=0
+  for item in $normalized; do
+    case "$item" in
+      vless)
+        SELECT_VLESS=1
+        ;;
+      hy2|hysteria|hysteria2)
+        SELECT_HY2=1
+        ;;
+      hy2端口跳跃|hy2跳跃|hysteria端口跳跃|hysteria跳跃|hysteria2端口跳跃|hysteria2跳跃|hy2-hop|hy2hop|hysteria-hop|hysteria2-hop|hop)
+        SELECT_HY2_HOP=1
+        ;;
+    esac
+  done
+}
+
+client_email_prefix() {
+  local raw="${NODE_NAME:-node}" safe
+  safe="$(printf "%s" "$raw" | sed 's#[/\\[:space:][:cntrl:]]#-#g; s#--*#-#g; s#^-##; s#-$##')"
+  printf "%s" "${safe:-node}"
+}
+
+client_email_for_kind() {
+  local kind="$1" prefix
+  prefix="$(client_email_prefix)"
+  case "$kind" in
+    vless) printf "%s-vless" "$prefix" ;;
+    hy2) printf "%s-hy2" "$prefix" ;;
+    hy2hop) printf "%s-hy2hop" "$prefix" ;;
+    *) printf "%s-%s" "$prefix" "$kind" ;;
+  esac
+}
+
 tuning_status_text() {
   local bbr qdisc
   bbr="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
@@ -703,25 +746,7 @@ prompt_node() {
 prompt_protocols() {
   info "协议准备"
   if [[ -n "$NODE_PROTOCOLS" ]]; then
-    local proto normalized item
-    proto="$(lower_text "$NODE_PROTOCOLS")"
-    normalized="$(printf "%s" "$proto" | sed 's#[/,+;|，、；]# #g')"
-    SELECT_VLESS=0
-    SELECT_HY2=0
-    SELECT_HY2_HOP=0
-    for item in $normalized; do
-      case "$item" in
-        vless)
-          SELECT_VLESS=1
-          ;;
-        hy2|hysteria|hysteria2)
-          SELECT_HY2=1
-          ;;
-        hy2端口跳跃|hy2跳跃|hysteria端口跳跃|hysteria跳跃|hysteria2端口跳跃|hysteria2跳跃|hy2-hop|hy2hop|hysteria-hop|hysteria2-hop|hop)
-          SELECT_HY2_HOP=1
-          ;;
-      esac
-    done
+    parse_protocols "$NODE_PROTOCOLS"
     [[ "$SELECT_VLESS" -eq 1 || "$SELECT_HY2" -eq 1 || "$SELECT_HY2_HOP" -eq 1 ]] || die "节点协议无法识别：$NODE_PROTOCOLS" "请填写 vless、hy2 或 hy2端口跳跃。"
     echo "节点协议：$(protocol_text)"
     return
@@ -1355,25 +1380,29 @@ existing_inbound_stream() {
 }
 
 client_exists() {
-  local email="$1"
-  xui_api GET "/clients/get/${email}" 2>/dev/null | jq -e '.success == true and .obj != null' >/dev/null 2>&1
+  local email="$1" encoded_email
+  encoded_email="$(url_encode "$email")"
+  xui_api GET "/clients/get/${encoded_email}" 2>/dev/null | jq -e '.success == true and .obj != null' >/dev/null 2>&1
 }
 
 client_get_json() {
-  local email="$1"
-  xui_api GET "/clients/get/${email}" 2>/dev/null | jq -c '.obj // empty'
+  local email="$1" encoded_email
+  encoded_email="$(url_encode "$email")"
+  xui_api GET "/clients/get/${encoded_email}" 2>/dev/null | jq -c '.obj // empty'
 }
 
 client_attached_to_inbound() {
-  local email="$1" inbound_id="$2"
-  xui_api GET "/clients/get/${email}" 2>/dev/null | jq -e --argjson inboundId "$inbound_id" '
+  local email="$1" inbound_id="$2" encoded_email
+  encoded_email="$(url_encode "$email")"
+  xui_api GET "/clients/get/${encoded_email}" 2>/dev/null | jq -e --argjson inboundId "$inbound_id" '
     .success == true and ((.obj.inboundIds // []) | index($inboundId)) != null' >/dev/null 2>&1
 }
 
 attach_client_to_inbound() {
-  local email="$1" inbound_id="$2" payload response msg
+  local email="$1" inbound_id="$2" payload response msg encoded_email
+  encoded_email="$(url_encode "$email")"
   payload="$(jq -cn --argjson inboundId "$inbound_id" '{inboundIds:[$inboundId]}')"
-  response="$(xui_api POST "/clients/${email}/attach" "$payload")" || return 1
+  response="$(xui_api POST "/clients/${encoded_email}/attach" "$payload")" || return 1
   if printf "%s" "$response" | json_success; then
     echo "已绑定客户端到入站：$email"
     return 0
@@ -1421,14 +1450,15 @@ client_update_payload() {
 }
 
 repair_master_client() {
-  local email="$1" kind="$2" flow="$3" client_json payload response msg
+  local email="$1" kind="$2" flow="$3" client_json payload response msg encoded_email
+  encoded_email="$(url_encode "$email")"
   client_json="$(client_get_json "$email")" || return 1
   [[ -n "$client_json" ]] || return 1
   if client_credentials_complete "$client_json" "$kind"; then
     return 0
   fi
   payload="$(client_update_payload "$client_json" "$kind" "$flow")"
-  response="$(xui_api POST "/clients/update/${email}" "$payload")" || return 1
+  response="$(xui_api POST "/clients/update/${encoded_email}" "$payload")" || return 1
   if printf "%s" "$response" | json_success; then
     echo "已修正客户端资料：$email"
     client_json="$(client_get_json "$email")" || return 1
@@ -1467,10 +1497,11 @@ client_links_are_complete() {
 }
 
 verify_client_links() {
-  local email="$1" kind="$2" scheme response client_json sub_id hop_ports
+  local email="$1" kind="$2" scheme response client_json sub_id hop_ports encoded_email encoded_sub_id
   scheme="$(expected_client_link_scheme "$kind")"
   [[ -n "$scheme" ]] || return 0
-  response="$(xui_api GET "/clients/links/${email}" 2>/dev/null || true)"
+  encoded_email="$(url_encode "$email")"
+  response="$(xui_api GET "/clients/links/${encoded_email}" 2>/dev/null || true)"
   client_links_are_complete "$response" "$kind" "$scheme" || {
     echo "客户端链接未生成：$email"
     if [[ "$kind" == "hy2hop" ]]; then
@@ -1486,7 +1517,8 @@ verify_client_links() {
     echo "客户端订阅 ID 未生成：$email"
     return 1
   }
-  response="$(xui_api GET "/clients/subLinks/${sub_id}" 2>/dev/null || true)"
+  encoded_sub_id="$(url_encode "$sub_id")"
+  response="$(xui_api GET "/clients/subLinks/${encoded_sub_id}" 2>/dev/null || true)"
   client_links_are_complete "$response" "$kind" "$scheme" || {
     echo "客户端订阅链接未生成：$email"
     if [[ "$kind" == "hy2hop" ]]; then
@@ -1499,13 +1531,14 @@ verify_client_links() {
 }
 
 client_link_status_word() {
-  local email="$1" kind="$2" scheme response
+  local email="$1" kind="$2" scheme response encoded_email
   scheme="$(expected_client_link_scheme "$kind")"
   [[ -n "$scheme" ]] || {
     printf "不适用"
     return
   }
-  response="$(xui_api GET "/clients/links/${email}" 2>/dev/null || true)"
+  encoded_email="$(url_encode "$email")"
+  response="$(xui_api GET "/clients/links/${encoded_email}" 2>/dev/null || true)"
   if client_links_are_complete "$response" "$kind" "$scheme"; then
     printf "已生成"
   else
@@ -1516,9 +1549,12 @@ client_link_status_word() {
 master_inbound_status_lines() {
   load_envs
   require_tools_for_json
-  local proto tag inbound_id kind email link_status any=0
+  local proto tag inbound_id kind email link_status any=0 want_vless want_hy2 want_hy2hop
   proto="${NODE_PROTOCOLS:-$(node_protocols_text)}"
-  proto="$(lower_text "$proto")"
+  parse_protocols "$proto"
+  want_vless="$SELECT_VLESS"
+  want_hy2="$SELECT_HY2"
+  want_hy2hop="$SELECT_HY2_HOP"
   [[ -n "$PANEL_URL" && -n "$PANEL_API_TOKEN" && -n "$NODE_NAME" ]] || {
     echo "- 主控自动接入：未配置"
     return 0
@@ -1527,19 +1563,19 @@ master_inbound_status_lines() {
   for kind in vless hy2 hy2hop; do
     case "$kind" in
       vless)
-        [[ "$proto" == *"vless"* ]] || continue
+        [[ "$want_vless" -eq 1 ]] || continue
         tag="akvps-${NODE_NAME}-vless"
-        email="${NODE_NAME}-vless"
+        email="$(client_email_for_kind vless)"
         ;;
       hy2)
-        [[ "$proto" == *"hy2"* ]] || continue
+        [[ "$want_hy2" -eq 1 ]] || continue
         tag="akvps-${NODE_NAME}-hy2"
-        email="${NODE_NAME}-hy2"
+        email="$(client_email_for_kind hy2)"
         ;;
       hy2hop)
-        [[ "$proto" == *"跳跃"* || "$proto" == *"hop"* ]] || continue
+        [[ "$want_hy2hop" -eq 1 ]] || continue
         tag="akvps-${NODE_NAME}-hy2hop"
-        email="${NODE_NAME}-hy2hop"
+        email="$(client_email_for_kind hy2hop)"
         ;;
     esac
     any=1
@@ -1583,15 +1619,15 @@ ensure_master_client() {
   local inbound_id="$1" kind="$2" email flow payload response msg
   case "$kind" in
     vless)
-      email="${NODE_NAME}-vless"
+      email="$(client_email_for_kind vless)"
       flow="xtls-rprx-vision"
       ;;
     hy2)
-      email="${NODE_NAME}-hy2"
+      email="$(client_email_for_kind hy2)"
       flow=""
       ;;
     hy2hop)
-      email="${NODE_NAME}-hy2hop"
+      email="$(client_email_for_kind hy2hop)"
       flow=""
       ;;
     *)
@@ -1790,9 +1826,12 @@ ensure_master_inbound() {
 
 ensure_master_inbounds() {
   load_envs
-  local node_id proto ok=1
+  local node_id proto ok=1 want_vless want_hy2 want_hy2hop
   proto="${NODE_PROTOCOLS:-$(node_protocols_text)}"
-  proto="$(lower_text "$proto")"
+  parse_protocols "$proto"
+  want_vless="$SELECT_VLESS"
+  want_hy2="$SELECT_HY2"
+  want_hy2hop="$SELECT_HY2_HOP"
   node_id="$(master_node_id 2>/dev/null || true)"
   [[ -n "$node_id" ]] || {
     echo "未找到主控节点 ID，跳过自动建入站。"
@@ -1805,13 +1844,13 @@ ensure_master_inbounds() {
     return 1
   fi
   echo "节点类型：$proto"
-  if [[ "$proto" == *"vless"* ]]; then
+  if [[ "$want_vless" -eq 1 ]]; then
     ensure_master_inbound "$node_id" "vless" "akvps-${NODE_NAME}-vless" "${NODE_NAME} vless" "$AKVPS_VLESS_PORT" || ok=0
   fi
-  if [[ "$proto" == *"hy2"* ]]; then
+  if [[ "$want_hy2" -eq 1 ]]; then
     ensure_master_inbound "$node_id" "hy2" "akvps-${NODE_NAME}-hy2" "${NODE_NAME} hy2" "$AKVPS_HY2_PORT" || ok=0
   fi
-  if [[ "$proto" == *"跳跃"* || "$proto" == *"hop"* ]]; then
+  if [[ "$want_hy2hop" -eq 1 ]]; then
     ensure_master_inbound "$node_id" "hy2hop" "akvps-${NODE_NAME}-hy2hop" "${NODE_NAME} hy2端口跳跃" "$AKVPS_HY2_HOP_START" || ok=0
   fi
   [[ "$ok" -eq 1 ]] || {
@@ -1849,17 +1888,18 @@ connect_node_to_master() {
   [[ -n "$NODE_NAME" && -n "$NODE_DOMAIN" && -n "$NODE_XUI_API_TOKEN" ]] || die "缺少当前节点信息。" "请先运行 2. 本机部署 -> 1. 代理节点。"
 
   info "测试节点连通"
-  local payload response status msg i
+  local payload response status xray_state msg i
   payload="$(build_node_payload)"
   for i in $(seq 1 12); do
     response="$(xui_api POST "/nodes/test" "$payload")" || die "无法连接主控面板 API。" "如果上面显示 HTTP 401/403，请重新导入主控机卡片里的完整 PANEL_API_TOKEN。"
     status="$(printf "%s" "$response" | jq -r '.obj.status // empty')"
-    msg="$(printf "%s" "$response" | jq -r '.obj.error // .obj.xrayError // .msg // empty')"
-    [[ "$status" == "online" ]] && break
+    xray_state="$(printf "%s" "$response" | jq -r '.obj.xrayState // .obj.xray.state // empty')"
+    msg="$(printf "%s" "$response" | jq -r '.obj.error // .obj.xrayError // .obj.xray.errorMsg // .msg // empty')"
+    [[ "$status" == "online" && "$xray_state" != "failed" && "$xray_state" != "error" ]] && break
     echo "节点暂未就绪，等待重试... $i/12"
     sleep 5
   done
-  [[ "$status" == "online" ]] || die "主控未能连上这个节点。" "请检查节点域名、11123 端口、节点 API Token。主控返回：${msg:-unknown}"
+  [[ "$status" == "online" && "$xray_state" != "failed" && "$xray_state" != "error" ]] || die "主控未确认节点和 Xray 正常。" "请检查节点域名、11123 端口、节点 API Token、Xray 状态。主控返回：${msg:-unknown}"
 
   info "接入主控面板"
   local existing_id action
@@ -2026,7 +2066,7 @@ protocol_text() {
 protocol_short_text() {
   local out=()
   [[ "$SELECT_VLESS" -eq 1 ]] && out+=("vless")
-  [[ "$SELECT_HY2" -eq 1 && "$SELECT_HY2_HOP" -eq 0 ]] && out+=("hy2")
+  [[ "$SELECT_HY2" -eq 1 ]] && out+=("hy2")
   [[ "$SELECT_HY2_HOP" -eq 1 ]] && out+=("hy2端口跳跃")
   if ((${#out[@]} == 0)); then
     echo ""
@@ -2034,6 +2074,23 @@ protocol_short_text() {
     local joined="${out[0]}" i
     for ((i = 1; i < ${#out[@]}; i++)); do
       joined="$joined / ${out[$i]}"
+    done
+    echo "$joined"
+  fi
+}
+
+planned_inbound_kinds() {
+  local proto="${1:-}" out=()
+  parse_protocols "$proto"
+  [[ "$SELECT_VLESS" -eq 1 ]] && out+=("vless")
+  [[ "$SELECT_HY2" -eq 1 ]] && out+=("hy2")
+  [[ "$SELECT_HY2_HOP" -eq 1 ]] && out+=("hy2hop")
+  if ((${#out[@]} == 0)); then
+    echo ""
+  else
+    local joined="${out[0]}" i
+    for ((i = 1; i < ${#out[@]}; i++)); do
+      joined="$joined ${out[$i]}"
     done
     echo "$joined"
   fi
@@ -2483,21 +2540,34 @@ self_check_inbounds() {
 }
 
 self_check_protocols() {
+  NODE_NAME="bad / node"
+  [[ "$(client_email_for_kind vless)" == "bad-node-vless" ]]
+  NODE_NAME="aktest"
   NODE_PROTOCOLS="vless / hy2端口跳跃"
   prompt_protocols >/dev/null
   [[ "$SELECT_VLESS" -eq 1 && "$SELECT_HY2" -eq 0 && "$SELECT_HY2_HOP" -eq 1 ]]
+  [[ "$(protocol_short_text)" == "vless / hy2端口跳跃" ]]
+  [[ "$(planned_inbound_kinds "$NODE_PROTOCOLS")" == "vless hy2hop" ]]
   NODE_PROTOCOLS="hy2端口跳跃"
   prompt_protocols >/dev/null
   [[ "$SELECT_VLESS" -eq 0 && "$SELECT_HY2" -eq 0 && "$SELECT_HY2_HOP" -eq 1 ]]
+  [[ "$(protocol_short_text)" == "hy2端口跳跃" ]]
+  [[ "$(planned_inbound_kinds "$NODE_PROTOCOLS")" == "hy2hop" ]]
   NODE_PROTOCOLS="hy2"
   prompt_protocols >/dev/null
   [[ "$SELECT_VLESS" -eq 0 && "$SELECT_HY2" -eq 1 && "$SELECT_HY2_HOP" -eq 0 ]]
+  [[ "$(protocol_short_text)" == "hy2" ]]
+  [[ "$(planned_inbound_kinds "$NODE_PROTOCOLS")" == "hy2" ]]
   NODE_PROTOCOLS="hy2 / hy2端口跳跃"
   prompt_protocols >/dev/null
   [[ "$SELECT_VLESS" -eq 0 && "$SELECT_HY2" -eq 1 && "$SELECT_HY2_HOP" -eq 1 ]]
+  [[ "$(protocol_short_text)" == "hy2 / hy2端口跳跃" ]]
+  [[ "$(planned_inbound_kinds "$NODE_PROTOCOLS")" == "hy2 hy2hop" ]]
   NODE_PROTOCOLS="vless / hy2 / hy2端口跳跃"
   prompt_protocols >/dev/null
   [[ "$SELECT_VLESS" -eq 1 && "$SELECT_HY2" -eq 1 && "$SELECT_HY2_HOP" -eq 1 ]]
+  [[ "$(protocol_short_text)" == "vless / hy2 / hy2端口跳跃" ]]
+  [[ "$(planned_inbound_kinds "$NODE_PROTOCOLS")" == "vless hy2 hy2hop" ]]
   NODE_PROTOCOLS=""
   echo "协议解析自检通过。"
 }
