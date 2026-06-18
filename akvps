@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.72-mvp"
+AKVPS_VERSION="0.1.73-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -725,13 +725,19 @@ detect_ssh_port() {
 }
 
 check_ports() {
-  local ports=("$AKVPS_XUI_PORT")
-  [[ "$SELECT_VLESS" -eq 1 ]] && ports+=("$AKVPS_VLESS_PORT")
-  [[ "$SELECT_HY2" -eq 1 ]] && ports+=("$AKVPS_HY2_PORT")
-  for p in "${ports[@]}"; do
-    if port_in_use "$p"; then
+  local entries=("${AKVPS_XUI_PORT}:tcp")
+  [[ "$SELECT_VLESS" -eq 1 ]] && entries+=("${AKVPS_VLESS_PORT}:tcp")
+  [[ "$SELECT_HY2" -eq 1 ]] && entries+=("${AKVPS_HY2_PORT}:udp")
+  [[ "$SELECT_HY2_HOP" -eq 1 ]] && entries+=("${AKVPS_HY2_HOP_START}:udp")
+  local entry p proto label
+  for entry in "${entries[@]}"; do
+    p="${entry%%:*}"
+    proto="${entry##*:}"
+    label="${p}/${proto}"
+    [[ "$SELECT_HY2_HOP" -eq 1 && "$p" == "$AKVPS_HY2_HOP_START" ]] && label="${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}/${proto}"
+    if port_in_use "$p" "$proto"; then
       [[ "$p" == "$AKVPS_XUI_PORT" && -x "$XUI_BIN" ]] && continue
-      die "端口 $p 已被占用。" "请先释放端口，再重新运行 akvps。"
+      die "端口 $label 已被占用。" "请先释放端口，再重新运行 akvps。"
     fi
   done
 }
@@ -3029,6 +3035,7 @@ self_check_inbounds() {
 }
 
 self_check_protocols() {
+  local seen_ports
   NODE_NAME="bad / node"
   [[ "$(client_email_for_kind vless)" == "bad-node-vless" ]]
   NODE_NAME="aktest"
@@ -3058,6 +3065,19 @@ self_check_protocols() {
   [[ "$(protocol_short_text)" == "vless / hy2 / hy2端口跳跃" ]]
   [[ "$(planned_inbound_kinds "$NODE_PROTOCOLS")" == "vless hy2 hy2hop" ]]
   NODE_PROTOCOLS=""
+  seen_ports=""
+  port_in_use() {
+    seen_ports="${seen_ports}${1}/${2:-tcp} "
+    return 1
+  }
+  SELECT_VLESS=1
+  SELECT_HY2=1
+  SELECT_HY2_HOP=1
+  check_ports
+  [[ "$seen_ports" == *"${AKVPS_XUI_PORT}/tcp"* ]]
+  [[ "$seen_ports" == *"${AKVPS_VLESS_PORT}/tcp"* ]]
+  [[ "$seen_ports" == *"${AKVPS_HY2_PORT}/udp"* ]]
+  [[ "$seen_ports" == *"${AKVPS_HY2_HOP_START}/udp"* ]]
   echo "协议解析自检通过。"
 }
 
