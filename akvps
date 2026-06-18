@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.63-mvp"
+AKVPS_VERSION="0.1.64-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1312,6 +1312,43 @@ mock_state_init() {
   jq -n '{nodes:[{id:7,name:"aktest"}],inbounds:[],clients:[]}' >"$AKVPS_MOCK_STATE"
 }
 
+mock_state_seed_broken_vless() {
+  cat >"$AKVPS_MOCK_STATE" <<'EOF'
+{
+  "nodes": [{"id": 7, "name": "aktest"}],
+  "inbounds": [{
+    "id": 1,
+    "nodeId": 7,
+    "tag": "akvps-aktest-vless",
+    "remark": "aktest vless old",
+    "port": 11789,
+    "protocol": "vless",
+    "settings": "{\"clients\":[],\"decryption\":\"none\"}",
+    "streamSettings": "{\"network\":\"tcp\",\"security\":\"reality\",\"realitySettings\":{\"privateKey\":\"old-private\",\"settings\":{\"publicKey\":\"old-public\"},\"shortIds\":[\"oldsid\"],\"target\":\"old.example:443\",\"serverNames\":[\"old.example\"]}}",
+    "sniffing": "{}"
+  }],
+  "clients": [{
+    "client": {
+      "email": "aktest-vless",
+      "subId": "",
+      "uuid": "old-uuid",
+      "id": "old-uuid",
+      "flow": "",
+      "enable": false,
+      "totalGB": 0,
+      "expiryTime": 0,
+      "tgId": 0,
+      "limitIp": 0,
+      "comment": "",
+      "reset": 0
+    },
+    "inboundIds": [],
+    "externalLinks": []
+  }]
+}
+EOF
+}
+
 mock_state_cleanup() {
   [[ -n "$AKVPS_MOCK_STATE" && -f "$AKVPS_MOCK_STATE" ]] && rm -f "$AKVPS_MOCK_STATE"
   AKVPS_MOCK_STATE=""
@@ -1394,13 +1431,14 @@ xui_api_mock() {
     "POST /clients/update/"*)
       email="${path##*/}"
       kind="$(mock_kind_from_email "$email")"
+      sub_id="${email}-sub"
       tmp="$(mktemp)"
-      jq --argjson client "$data" --arg email "$email" --arg kind "$kind" '
+      jq --argjson client "$data" --arg email "$email" --arg kind "$kind" --arg subId "$sub_id" '
         .clients = (.clients | map(if .client.email == $email then
           .client = (
             .client
             + $client
-            + {enable:true}
+            + {enable:true, subId:((.client.subId // $client.subId // "") as $sid | if $sid == "" then $subId else $sid end)}
             + (if $kind == "vless" then {uuid:(.client.uuid // .client.id // "mock-uuid"), id:(.client.id // .client.uuid // "mock-uuid"), flow:"xtls-rprx-vision"}
                elif ($kind == "hy2" or $kind == "hy2hop") then {auth:(.client.auth // "mock-auth"), flow:""}
                else {} end)
@@ -2749,6 +2787,28 @@ self_check_master_flow() {
     and any(.clients[]; .client.email == "aktest-hy2" and .client.auth != "")
     and any(.clients[]; .client.email == "aktest-hy2hop" and .client.auth != "")
   ' "$AKVPS_MOCK_STATE" >/dev/null
+
+  NODE_PROTOCOLS="vless"
+  mock_state_cleanup
+  mock_state_init
+  mock_state_seed_broken_vless
+  ensure_master_inbounds >/dev/null
+  jq -e '
+    (.inbounds | length) == 1
+    and (.clients | length) == 1
+    and (.inbounds[0].tag == "akvps-aktest-vless")
+    and (.inbounds[0].remark == "aktest vless")
+    and (.inbounds[0].streamSettings | fromjson | .realitySettings.privateKey) == "old-private"
+    and (.inbounds[0].streamSettings | fromjson | .realitySettings.settings.publicKey) == "old-public"
+    and (.inbounds[0].streamSettings | fromjson | .realitySettings.shortIds[0]) == "oldsid"
+    and (.clients[0].client.email == "aktest-vless")
+    and (.clients[0].client.enable == true)
+    and (.clients[0].client.subId == "aktest-vless-sub")
+    and (.clients[0].client.uuid == "old-uuid")
+    and (.clients[0].client.flow == "xtls-rprx-vision")
+    and (.clients[0].inboundIds == [1])
+  ' "$AKVPS_MOCK_STATE" >/dev/null
+  verify_client_links "aktest-vless" vless >/dev/null
   echo "主控一键接入链路自检通过。"
 }
 
