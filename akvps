@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.70-mvp"
+AKVPS_VERSION="0.1.71-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1281,6 +1281,22 @@ url_host_from_url() {
   printf "%s" "$host"
 }
 
+url_port_from_url() {
+  local url="$1" hostport port
+  hostport="${url#*://}"
+  hostport="${hostport%%/*}"
+  if [[ "$hostport" == *:* && "$hostport" != \[* ]]; then
+    port="${hostport##*:}"
+  else
+    port=""
+  fi
+  if [[ "$port" =~ ^[0-9]+$ ]]; then
+    printf "%s" "$port"
+  else
+    printf "%s" "$AKVPS_XUI_PORT"
+  fi
+}
+
 is_local_master_panel() {
   [[ -x "$XUI_BIN" ]] \
     && [[ -n "$PANEL_URL" && -n "$PANEL_API_TOKEN" ]] \
@@ -1548,16 +1564,17 @@ xui_api() {
 }
 
 build_node_payload() {
-  local base_path address
+  local base_path address port
   base_path="$(node_base_path_from_url "$NODE_XUI_URL")"
   address="$(url_host_from_url "$NODE_XUI_URL")"
+  port="$(url_port_from_url "$NODE_XUI_URL")"
   [[ -n "$address" ]] || address="$NODE_DOMAIN"
   jq -n \
     --arg name "$NODE_NAME" \
     --arg address "$address" \
     --arg basePath "$base_path" \
     --arg apiToken "$NODE_XUI_API_TOKEN" \
-    --argjson port "$AKVPS_XUI_PORT" \
+    --argjson port "$port" \
     '{
       name: $name,
       remark: $name,
@@ -1730,7 +1747,8 @@ client_credentials_complete() {
     and (.client.enable // false) == true
     and (
       if $kind == "vless" then
-        (.client.uuid // .client.id // "") != "" and (.client.flow // "") == "xtls-rprx-vision"
+        (.client.uuid // "") != ""
+        and (.client.flow // "") == "xtls-rprx-vision"
       elif ($kind == "hy2" or $kind == "hy2hop") then
         (.client.auth // "") != ""
       else
@@ -1752,7 +1770,7 @@ client_update_payload() {
     | .reset = (.reset // 0)
     | .group = (.group // "")
     | if $kind == "vless" then
-        .id = ((.uuid // .id // "") | tostring)
+        .id = ((.uuid // (if ((.id // null) | type) == "string" then .id else "" end) // "") | tostring)
         | .flow = $flow
       else
         .flow = ""
@@ -1796,14 +1814,22 @@ expected_client_link_scheme() {
 client_links_are_complete() {
   local response="$1" kind="$2" scheme="$3" hop_ports
   printf "%s" "$response" | jq -e --arg scheme "$scheme" '
+    def links:
+      if (.obj | type) == "array" then .obj
+      elif (.obj | type) == "string" then (.obj | split("\n") | map(select(length > 0)))
+      else []
+      end;
     .success == true
-    and (.obj | type) == "array"
-    and any(.obj[]; type == "string" and startswith($scheme))' >/dev/null 2>&1 || return 1
+    and any(links[]; type == "string" and startswith($scheme))' >/dev/null 2>&1 || return 1
   if [[ "$kind" == "vless" ]]; then
     printf "%s" "$response" | jq -e --arg scheme "$scheme" '
+      def links:
+        if (.obj | type) == "array" then .obj
+        elif (.obj | type) == "string" then (.obj | split("\n") | map(select(length > 0)))
+        else []
+        end;
       .success == true
-      and (.obj | type) == "array"
-      and any(.obj[];
+      and any(links[];
         type == "string"
         and startswith($scheme)
         and contains("type=tcp")
@@ -1818,9 +1844,13 @@ client_links_are_complete() {
   fi
   if [[ "$kind" == "hy2" || "$kind" == "hy2hop" ]]; then
     printf "%s" "$response" | jq -e --arg scheme "$scheme" '
+      def links:
+        if (.obj | type) == "array" then .obj
+        elif (.obj | type) == "string" then (.obj | split("\n") | map(select(length > 0)))
+        else []
+        end;
       .success == true
-      and (.obj | type) == "array"
-      and any(.obj[];
+      and any(links[];
         type == "string"
         and startswith($scheme)
         and contains("security=tls")
@@ -1829,9 +1859,13 @@ client_links_are_complete() {
   if [[ "$kind" == "hy2hop" ]]; then
     hop_ports="${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}"
     printf "%s" "$response" | jq -e --arg scheme "$scheme" --arg ports "$hop_ports" '
+      def links:
+        if (.obj | type) == "array" then .obj
+        elif (.obj | type) == "string" then (.obj | split("\n") | map(select(length > 0)))
+        else []
+        end;
       .success == true
-      and (.obj | type) == "array"
-      and any(.obj[]; type == "string" and startswith($scheme) and contains("mport=" + $ports))' >/dev/null 2>&1 || return 1
+      and any(links[]; type == "string" and startswith($scheme) and contains("mport=" + $ports))' >/dev/null 2>&1 || return 1
   fi
 }
 
@@ -2879,8 +2913,14 @@ self_check_inbounds() {
   local vless hy2 hy2hop
   [[ "$(normalize_panel_url "https://example.com/base/panel/")" == "https://example.com/base" ]]
   [[ "$(node_base_path_from_url "https://example.com/base/panel/")" == "/base/" ]]
+  [[ "$(url_port_from_url "https://example.com/base/panel/")" == "$AKVPS_XUI_PORT" ]]
+  [[ "$(url_port_from_url "https://example.com:2053/base/panel/")" == "2053" ]]
   PANEL_URL="https://example.com/base/panel/"
   [[ "$(api_base_from_panel_url)" == "https://example.com/base/panel/api" ]]
+  NODE_XUI_URL="https://node.example.com:2053/node-path/"
+  NODE_XUI_API_TOKEN="node-token"
+  build_node_payload | jq -e '.address == "node.example.com" and .port == 2053 and .basePath == "/node-path/"' >/dev/null
+  NODE_XUI_URL=""
   vless="$(build_minimal_inbound_payload 1 vless akvps-aktest-vless "aktest vless" "$AKVPS_VLESS_PORT" 0 "")"
   hy2="$(build_minimal_inbound_payload 1 hy2 akvps-aktest-hy2 "aktest hy2" "$AKVPS_HY2_PORT" 0 "")"
   hy2hop="$(build_minimal_inbound_payload 1 hy2hop akvps-aktest-hy2hop "aktest hy2端口跳跃" "$AKVPS_HY2_HOP_START" 0 "")"
@@ -2915,11 +2955,14 @@ self_check_inbounds() {
   [[ "$(expected_client_link_scheme hy2)" == "hysteria2://" ]]
   [[ "$(expected_client_link_scheme hy2hop)" == "hysteria2://" ]]
   client_links_are_complete '{"success":true,"obj":["hysteria2://auth@example:39999?security=tls&mport=39999-59999"]}' hy2hop "hysteria2://"
+  client_links_are_complete '{"success":true,"obj":"hysteria2://auth@example:39999?security=tls&mport=39999-59999\n"}' hy2hop "hysteria2://"
   ! client_links_are_complete '{"success":true,"obj":["hysteria2://auth@example:39999?security=tls"]}' hy2hop "hysteria2://"
   client_links_are_complete '{"success":true,"obj":["vless://uuid@example:443?type=tcp&encryption=none&security=reality&pbk=pub&sid=abcd&sni=www.microsoft.com&fp=chrome&flow=xtls-rprx-vision#aktest"]}' vless "vless://"
+  client_links_are_complete '{"success":true,"obj":"vless://uuid@example:443?type=tcp&encryption=none&security=reality&pbk=pub&sid=abcd&sni=www.microsoft.com&fp=chrome&flow=xtls-rprx-vision#aktest\n"}' vless "vless://"
   ! client_links_are_complete '{"success":true,"obj":["vless://uuid@example:443?security=reality#aktest"]}' vless "vless://"
   ! client_links_are_complete '{"success":true,"obj":[]}' vless "vless://"
   client_credentials_complete '{"client":{"email":"aktest-vless","subId":"sub1","uuid":"uuid1","flow":"xtls-rprx-vision","enable":true}}' vless
+  ! client_credentials_complete '{"client":{"id":42,"email":"aktest-vless","subId":"sub1","flow":"xtls-rprx-vision","enable":true}}' vless
   ! client_credentials_complete '{"client":{"email":"aktest-vless","subId":"","uuid":"uuid1","flow":"xtls-rprx-vision","enable":true}}' vless
   client_credentials_complete '{"client":{"email":"aktest-hy2","subId":"sub2","auth":"auth1","enable":true}}' hy2
   ! client_credentials_complete '{"client":{"email":"aktest-hy2","subId":"sub2","auth":"","enable":true}}' hy2
@@ -2927,6 +2970,8 @@ self_check_inbounds() {
     .enable == true and .flow == "xtls-rprx-vision" and .email == "aktest-vless" and .id == "uuid1"' >/dev/null
   client_update_payload '{"client":{"id":42,"email":"aktest-vless","subId":"sub1","uuid":"uuid-from-db","flow":"","enable":true}}' vless "xtls-rprx-vision" | jq -e '
     .id == "uuid-from-db" and .flow == "xtls-rprx-vision"' >/dev/null
+  client_update_payload '{"client":{"id":42,"email":"aktest-vless","subId":"sub1","flow":"","enable":true}}' vless "xtls-rprx-vision" | jq -e '
+    .id == "" and .flow == "xtls-rprx-vision"' >/dev/null
   printf '%s' '{"id":9,"nodeId":1,"shareAddrStrategy":"node","shareAddr":"","protocol":"vless","settings":{"clients":[],"decryption":"none","encryption":"none"},"streamSettings":{"network":"tcp","security":"reality","realitySettings":{"target":"www.microsoft.com:443","dest":"www.microsoft.com:443","privateKey":"priv","serverNames":["www.microsoft.com"],"shortIds":["abcd"],"settings":{"publicKey":"pub","fingerprint":"chrome"}}}}' | jq -e --arg kind vless --argjson nodeId 1 --arg ports "${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}" '
     def json_obj:
       if type == "string" then (fromjson? // {})
