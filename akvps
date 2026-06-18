@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.20-mvp"
+AKVPS_VERSION="0.1.21-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -607,7 +607,8 @@ update_akvps() {
   curl -fsSL https://raw.githubusercontent.com/AngKouChan/akvps/main/akvps -o "$tmp_file"
   install -m 0755 "$tmp_file" /usr/local/bin/akvps
   rm -f "$tmp_file"
-  echo "akvps 已更新。重新输入 akvps 可打开新版菜单。"
+  echo "akvps 已更新，正在重新打开新版菜单..."
+  exec /usr/local/bin/akvps
 }
 
 uninstall_akvps() {
@@ -1614,7 +1615,7 @@ updates_menu() {
     echo "0. 返回"
     read -r -p "请选择: " sub
     case "$sub" in
-      1) update_akvps; pause_menu ;;
+      1) update_akvps ;;
       2) update_xui; pause_menu ;;
       3) update_komari_agent; pause_menu ;;
       4) clear_akvps_settings; pause_menu ;;
