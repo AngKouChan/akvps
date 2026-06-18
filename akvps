@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.50-mvp"
+AKVPS_VERSION="0.1.51-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1290,6 +1290,31 @@ attach_client_to_inbound() {
   return 1
 }
 
+expected_client_link_scheme() {
+  case "$1" in
+    vless) printf "vless://" ;;
+    hy2|hy2hop) printf "hy2://" ;;
+    *) printf "" ;;
+  esac
+}
+
+verify_client_links() {
+  local email="$1" kind="$2" scheme response count
+  scheme="$(expected_client_link_scheme "$kind")"
+  [[ -n "$scheme" ]] || return 0
+  response="$(xui_api GET "/clients/links/${email}" 2>/dev/null || true)"
+  count="$(printf "%s" "$response" | jq -r --arg scheme "$scheme" '
+    if .success == true and (.obj | type) == "array" then
+      [.obj[] | select(type == "string" and startswith($scheme))] | length
+    else 0 end' 2>/dev/null || echo 0)"
+  if [[ "$count" -gt 0 ]]; then
+    echo "客户端链接已生成：$email"
+    return 0
+  fi
+  echo "提示：客户端已创建，但暂未取到 ${scheme} 分享链接。"
+  return 1
+}
+
 build_client_payload() {
   local email="$1" inbound_id="$2" flow="${3:-}"
   jq -cn \
@@ -1336,12 +1361,14 @@ ensure_master_client() {
     else
       attach_client_to_inbound "$email" "$inbound_id" || return 1
     fi
+    verify_client_links "$email" "$kind" || true
     return 0
   fi
   payload="$(build_client_payload "$email" "$inbound_id" "$flow")"
   response="$(xui_api POST "/clients/add" "$payload")" || return 1
   if printf "%s" "$response" | json_success; then
     echo "已创建客户端：$email"
+    verify_client_links "$email" "$kind" || true
     return 0
   fi
   msg="$(printf "%s" "$response" | jq -r '.msg // empty')"
@@ -2086,6 +2113,9 @@ self_check_inbounds() {
     .client.email == "aktest-vless"
     and .client.flow == "xtls-rprx-vision"
     and .inboundIds == [1]' >/dev/null
+  [[ "$(expected_client_link_scheme vless)" == "vless://" ]]
+  [[ "$(expected_client_link_scheme hy2)" == "hy2://" ]]
+  [[ "$(expected_client_link_scheme hy2hop)" == "hy2://" ]]
   vless="$(build_minimal_inbound_payload 1 vless akvps-aktest-vless "aktest vless" "$AKVPS_VLESS_PORT" 7 '{"settings":{"clients":[{"email":"old","id":"old-id"}]},"streamSettings":{"realitySettings":{"privateKey":"old-private","settings":{"publicKey":"old-public"},"shortIds":["oldsid"],"target":"old.example:443","serverNames":["old.example"]}}}')"
   printf "%s" "$vless" | jq -e '
     (.settings | fromjson | .clients[0].email) == "old"
