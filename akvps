@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.18-mvp"
+AKVPS_VERSION="0.1.19-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -25,6 +25,8 @@ AKVPS_TERMIUS_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG1hH9mQn8JLkMbbstN+ZH
 XUI_BIN="/usr/local/x-ui/x-ui"
 XUI_RESULT="/etc/x-ui/install-result.env"
 XUI_DB="/etc/x-ui/x-ui.db"
+KOMARI_DIR="/opt/komari"
+KOMARI_SERVICE="/etc/systemd/system/komari.service"
 
 MASTER_IPV4=""
 MASTER_IPV6=""
@@ -1310,11 +1312,35 @@ install_komari_server() {
   KOMARI_SERVER_REUSED=0
   if port_in_use "$AKVPS_KOMARI_PORT"; then
     if systemctl is-active --quiet komari 2>/dev/null; then
-      echo "检测到已安装 Komari 主站，复用现有安装。"
-      KOMARI_SERVER_REUSED=1
-      return 0
+      echo "检测到已安装 Komari 主站。"
+      echo "1. 复用现有主站"
+      echo "2. 重装主站（会删除旧 Komari 数据，并重新生成账号密码）"
+      echo "0. 取消"
+      read -r -p "请选择: " choice
+      case "$choice" in
+        1)
+          KOMARI_SERVER_REUSED=1
+          return 0
+          ;;
+        2)
+          read -r -p "确认重装？输入 YES 继续: " confirm
+          [[ "$confirm" == "YES" ]] || die "已取消重装。" "需要时重新运行探针主站部署。"
+          systemctl stop komari 2>/dev/null || true
+          systemctl disable komari 2>/dev/null || true
+          rm -f "$KOMARI_SERVICE"
+          systemctl daemon-reload 2>/dev/null || true
+          rm -rf "$KOMARI_DIR"
+          ;;
+        0)
+          die "已取消。" "需要时重新运行探针主站部署。"
+          ;;
+        *)
+          die "选择无效。" "请选择 1、2 或 0。"
+          ;;
+      esac
+    else
+      die "端口 $AKVPS_KOMARI_PORT 已被占用。" "请先释放端口，再重新运行 akvps。"
     fi
-    die "端口 $AKVPS_KOMARI_PORT 已被占用。" "请先释放端口，再重新运行 akvps。"
   fi
   tmp_file="$(mktemp)"
   curl -fsSL https://raw.githubusercontent.com/komari-monitor/komari/main/install-komari.sh -o "$tmp_file"
