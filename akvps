@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.71-mvp"
+AKVPS_VERSION="0.1.72-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1759,9 +1759,18 @@ client_credentials_complete() {
 
 client_update_payload() {
   local client_json="$1" kind="$2" flow="${3:-}"
-  printf "%s" "$client_json" | jq -c --arg kind "$kind" --arg flow "$flow" '
+  local email sub_id uuid auth
+  email="$(printf "%s" "$client_json" | jq -r '.client.email // empty')"
+  sub_id="$(printf "%s" "$client_json" | jq -r '.client.subId // empty')"
+  [[ -n "$sub_id" ]] || sub_id="$(client_sub_id_for_email "$email")"
+  uuid="$(printf "%s" "$client_json" | jq -r 'if (.client.uuid // "") != "" then .client.uuid elif ((.client.id // null) | type) == "string" then .client.id else "" end')"
+  [[ "$kind" == "vless" && -z "$uuid" ]] && uuid="$(random_uuid)"
+  auth="$(printf "%s" "$client_json" | jq -r '.client.auth // empty')"
+  [[ ( "$kind" == "hy2" || "$kind" == "hy2hop" ) && -z "$auth" ]] && auth="$(random_string 32)"
+  printf "%s" "$client_json" | jq -c --arg kind "$kind" --arg flow "$flow" --arg subId "$sub_id" --arg uuid "$uuid" --arg auth "$auth" '
     .client
     | .enable = true
+    | .subId = $subId
     | .totalGB = (.totalGB // 0)
     | .expiryTime = (.expiryTime // 0)
     | .tgId = (.tgId // 0)
@@ -1770,8 +1779,11 @@ client_update_payload() {
     | .reset = (.reset // 0)
     | .group = (.group // "")
     | if $kind == "vless" then
-        .id = ((.uuid // (if ((.id // null) | type) == "string" then .id else "" end) // "") | tostring)
+        .id = $uuid
         | .flow = $flow
+      elif ($kind == "hy2" or $kind == "hy2hop") then
+        .auth = $auth
+        | .flow = ""
       else
         .flow = ""
       end'
@@ -2971,7 +2983,9 @@ self_check_inbounds() {
   client_update_payload '{"client":{"id":42,"email":"aktest-vless","subId":"sub1","uuid":"uuid-from-db","flow":"","enable":true}}' vless "xtls-rprx-vision" | jq -e '
     .id == "uuid-from-db" and .flow == "xtls-rprx-vision"' >/dev/null
   client_update_payload '{"client":{"id":42,"email":"aktest-vless","subId":"sub1","flow":"","enable":true}}' vless "xtls-rprx-vision" | jq -e '
-    .id == "" and .flow == "xtls-rprx-vision"' >/dev/null
+    (.id | test("^[0-9a-f-]{36}$")) and .flow == "xtls-rprx-vision"' >/dev/null
+  client_update_payload '{"client":{"email":"aktest-hy2","subId":"","auth":"","enable":false}}' hy2 "" | jq -e '
+    .enable == true and .subId == "aktest-hy2-sub" and (.auth | test("^[0-9a-f]{32}$")) and .flow == ""' >/dev/null
   printf '%s' '{"id":9,"nodeId":1,"shareAddrStrategy":"node","shareAddr":"","protocol":"vless","settings":{"clients":[],"decryption":"none","encryption":"none"},"streamSettings":{"network":"tcp","security":"reality","realitySettings":{"target":"www.microsoft.com:443","dest":"www.microsoft.com:443","privateKey":"priv","serverNames":["www.microsoft.com"],"shortIds":["abcd"],"settings":{"publicKey":"pub","fingerprint":"chrome"}}}}' | jq -e --arg kind vless --argjson nodeId 1 --arg ports "${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}" '
     def json_obj:
       if type == "string" then (fromjson? // {})
