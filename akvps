@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.16-mvp"
+AKVPS_VERSION="0.1.17-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -522,6 +522,7 @@ prompt_node() {
   while true; do
     read -r -p "请输入节点短名，例如 jp1: " NODE_NAME
     NODE_NAME="${NODE_NAME// /}"
+    NODE_NAME="${NODE_NAME,,}"
     NODE_DOMAIN="${NODE_NAME}.${AKVPS_ROOT_DOMAIN}"
     valid_domain "$NODE_DOMAIN" && break
     echo "节点短名无法组成合法域名，请重新输入。"
@@ -1064,6 +1065,7 @@ prompt_panel() {
   while true; do
     read -r -p "请输入主控短名，例如 panel: " PANEL_NAME
     PANEL_NAME="${PANEL_NAME// /}"
+    PANEL_NAME="${PANEL_NAME,,}"
     PANEL_DOMAIN="${PANEL_NAME}.${AKVPS_ROOT_DOMAIN}"
     valid_domain "$PANEL_DOMAIN" && break
     echo "主控短名无法组成合法域名，请重新输入。"
@@ -1228,6 +1230,7 @@ MASTER_IPV6=${PUBLIC_IPV6}
 PANEL_DOMAIN=${PANEL_DOMAIN}
 PANEL_URL=${XUI_ACCESS_URL}
 PANEL_API_TOKEN=${XUI_API_TOKEN}
+END
 \`\`\`
 
 EOF
@@ -1293,6 +1296,7 @@ prompt_komari_server() {
   while true; do
     read -r -p "请输入主站短名，例如 status: " KOMARI_SERVER_NAME
     KOMARI_SERVER_NAME="${KOMARI_SERVER_NAME// /}"
+    KOMARI_SERVER_NAME="${KOMARI_SERVER_NAME,,}"
     KOMARI_SERVER_DOMAIN="${KOMARI_SERVER_NAME}.${AKVPS_ROOT_DOMAIN}"
     valid_domain "$KOMARI_SERVER_DOMAIN" && break
     echo "主站短名无法组成合法域名，请重新输入。"
