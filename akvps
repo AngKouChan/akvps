@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.51-mvp"
+AKVPS_VERSION="0.1.52-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1315,6 +1315,66 @@ verify_client_links() {
   return 1
 }
 
+client_link_status_word() {
+  local email="$1" kind="$2" scheme response count
+  scheme="$(expected_client_link_scheme "$kind")"
+  [[ -n "$scheme" ]] || {
+    printf "不适用"
+    return
+  }
+  response="$(xui_api GET "/clients/links/${email}" 2>/dev/null || true)"
+  count="$(printf "%s" "$response" | jq -r --arg scheme "$scheme" '
+    if .success == true and (.obj | type) == "array" then
+      [.obj[] | select(type == "string" and startswith($scheme))] | length
+    else 0 end' 2>/dev/null || echo 0)"
+  if [[ "$count" -gt 0 ]]; then
+    printf "已生成"
+  else
+    printf "未生成"
+  fi
+}
+
+master_inbound_status_lines() {
+  load_envs
+  require_tools_for_json
+  local proto tag inbound_id kind email link_status any=0
+  proto="${NODE_PROTOCOLS:-$(node_protocols_text)}"
+  proto="${proto,,}"
+  [[ -n "$PANEL_URL" && -n "$PANEL_API_TOKEN" && -n "$NODE_NAME" ]] || {
+    echo "- 主控自动接入：未配置"
+    return 0
+  }
+  echo "- 主控节点：$(xui_api GET "/nodes/list" 2>/dev/null | jq -r --arg name "$NODE_NAME" 'if [.obj[]? | select(.name == $name)] | length > 0 then "已存在" else "未找到" end' 2>/dev/null || echo "未确认")"
+  for kind in vless hy2 hy2hop; do
+    case "$kind" in
+      vless)
+        [[ "$proto" == *"vless"* ]] || continue
+        tag="akvps-${NODE_NAME}-vless"
+        email="${NODE_NAME}-vless"
+        ;;
+      hy2)
+        [[ "$proto" == *"hy2"* ]] || continue
+        tag="akvps-${NODE_NAME}-hy2"
+        email="${NODE_NAME}-hy2"
+        ;;
+      hy2hop)
+        [[ "$proto" == *"跳跃"* || "$proto" == *"hop"* ]] || continue
+        tag="akvps-${NODE_NAME}-hy2hop"
+        email="${NODE_NAME}-hy2hop"
+        ;;
+    esac
+    any=1
+    inbound_id="$(master_inbound_id_by_tag "$tag" 2>/dev/null || true)"
+    if [[ -n "$inbound_id" ]]; then
+      link_status="$(client_link_status_word "$email" "$kind")"
+      echo "- ${kind} 入站：已存在；客户端：${email}；链接：${link_status}"
+    else
+      echo "- ${kind} 入站：未找到；客户端：${email}；链接：未确认"
+    fi
+  done
+  [[ "$any" -eq 1 ]] || echo "- 主控入站：未记录节点协议"
+}
+
 build_client_payload() {
   local email="$1" inbound_id="$2" flow="${3:-}"
   jq -cn \
@@ -1576,6 +1636,7 @@ connect_node_to_master() {
   [[ -n "$existing_id" ]] || die "主控列表里没有找到这个节点。" "请稍后在主控面板节点列表确认，或重新运行节点部署。"
   echo "验证通过：主控已存在节点 $NODE_NAME"
   ensure_master_inbounds || true
+  master_inbound_status_lines || true
 }
 
 verify_master_connection() {
@@ -1591,6 +1652,7 @@ verify_master_connection() {
   [[ -n "$existing_id" ]] || die "主控里没有找到当前节点。" "请先运行 3. 日常维护 -> 1. 接入主控。"
   echo "验证通过：主控已存在节点 $NODE_NAME"
   ensure_master_inbounds || true
+  master_inbound_status_lines || true
 }
 
 verify_komari_agent() {
@@ -2210,6 +2272,7 @@ show_simple_deploy_report() {
   echo "- 探针接入：$komari_status_word"
   echo "- 运行服务：3X-UI ${xui_status} / Komari ${komari_status}"
   echo "- 调优状态：$tuning_status"
+  master_inbound_status_lines || true
 }
 
 one_click_deploy() {
