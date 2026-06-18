@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.39-mvp"
+AKVPS_VERSION="0.1.40-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1199,14 +1199,21 @@ ensure_master_inbound() {
 
 ensure_master_inbounds() {
   load_envs
-  [[ -n "$NODE_PROTOCOLS" ]] || return 0
-  local node_id proto="${NODE_PROTOCOLS,,}" ok=1
+  local node_id proto ok=1
+  proto="${NODE_PROTOCOLS:-$(node_protocols_text)}"
+  proto="${proto,,}"
   node_id="$(master_node_id 2>/dev/null || true)"
   [[ -n "$node_id" ]] || {
     echo "未找到主控节点 ID，跳过自动建入站。"
     return 1
   }
   info "自动创建主控入站"
+  if [[ -z "$proto" || "$proto" == "未记录" ]]; then
+    echo "缺少节点类型，暂时无法自动建入站。"
+    echo "建议：重新运行一次代理节点部署，或手动在主控建入站。"
+    return 1
+  fi
+  echo "节点类型：$proto"
   if [[ "$proto" == *"vless"* ]]; then
     ensure_master_inbound "$node_id" "vless" "akvps-${NODE_NAME}-vless" "${NODE_NAME} vless" "$AKVPS_VLESS_PORT" || ok=0
   fi
@@ -1280,6 +1287,7 @@ verify_master_connection() {
   existing_id="$(xui_api GET "/nodes/list" | jq -r --arg name "$NODE_NAME" '.obj[]? | select(.name == $name) | .id' | head -n1)" || existing_id=""
   [[ -n "$existing_id" ]] || die "主控里没有找到当前节点。" "请先运行 3. 日常维护 -> 1. 接入主控。"
   echo "验证通过：主控已存在节点 $NODE_NAME"
+  ensure_master_inbounds || true
 }
 
 verify_komari_agent() {
