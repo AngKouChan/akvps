@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.8-mvp"
+AKVPS_VERSION="0.1.9-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -36,10 +36,10 @@ PANEL_URL=""
 PANEL_API_TOKEN=""
 NODE_XUI_URL=""
 NODE_XUI_API_TOKEN=""
+KOMARI_SERVER_DOMAIN=""
 KOMARI_ENDPOINT=""
 KOMARI_TOKEN=""
 KOMARI_SERVER_NAME=""
-KOMARI_SERVER_DOMAIN=""
 PUBLIC_IPV4=""
 PUBLIC_IPV6=""
 SELECT_VLESS=0
@@ -102,6 +102,7 @@ load_envs() {
   NODE_DOMAIN="${NODE_DOMAIN:-}"
   NODE_XUI_URL="${NODE_XUI_URL:-}"
   NODE_XUI_API_TOKEN="${NODE_XUI_API_TOKEN:-}"
+  KOMARI_SERVER_DOMAIN="${KOMARI_SERVER_DOMAIN:-}"
   KOMARI_ENDPOINT="${KOMARI_ENDPOINT:-}"
   KOMARI_TOKEN="${KOMARI_TOKEN:-}"
 }
@@ -201,6 +202,12 @@ save_import_pair() {
     NODE_XUI_URL|NODE_URL)
       save_config_var "NODE_XUI_URL" "$value"
       ;;
+    KOMARI_SERVER_DOMAIN)
+      save_config_var "KOMARI_SERVER_DOMAIN" "$value"
+      ;;
+    KOMARI_ENDPOINT|KOMARI_URL|KOMARI_SERVER_URL)
+      save_config_var "KOMARI_ENDPOINT" "$value"
+      ;;
     CLOUDFLARE_TOKEN|CF_TOKEN)
       save_secret_var "CLOUDFLARE_TOKEN" "$value"
       ;;
@@ -244,6 +251,22 @@ import_basic_info() {
   paste_import_lines "粘贴导入"
 }
 
+import_all_info() {
+  need_root
+  ensure_dirs
+  info "一键导入"
+  echo "可用字段："
+  echo "AKVPS_ROOT_DOMAIN=根域名"
+  echo "CLOUDFLARE_TOKEN=Cloudflare Token"
+  echo "MASTER_IPV4=主控IPv4"
+  echo "PANEL_DOMAIN=主控域名"
+  echo "PANEL_URL=主控面板完整地址"
+  echo "PANEL_API_TOKEN=3x-ui 主控 API Token"
+  echo "KOMARI_SERVER_DOMAIN=探针主站域名"
+  echo "KOMARI_ENDPOINT=探针主站地址"
+  paste_import_lines "粘贴导入"
+}
+
 import_panel_info() {
   need_root
   ensure_dirs
@@ -252,6 +275,16 @@ import_panel_info() {
   echo "PANEL_DOMAIN=主控域名"
   echo "PANEL_URL=主控面板完整地址"
   echo "PANEL_API_TOKEN=3x-ui API Token"
+  paste_import_lines "粘贴导入"
+}
+
+import_komari_info() {
+  need_root
+  ensure_dirs
+  info "探针信息"
+  echo "可用字段："
+  echo "KOMARI_SERVER_DOMAIN=探针主站域名"
+  echo "KOMARI_ENDPOINT=探针主站地址，例如 https://status.kouzho.cc"
   paste_import_lines "粘贴导入"
 }
 
@@ -269,6 +302,10 @@ show_saved_info() {
   echo "- 主控域名：${PANEL_DOMAIN:-未设置}"
   echo "- 主控面板地址：${PANEL_URL:-未设置}"
   echo "- 主控 API Token：$(mask_secret "$PANEL_API_TOKEN")"
+  echo
+  echo "探针信息："
+  echo "- 探针主站域名：${KOMARI_SERVER_DOMAIN:-未设置}"
+  echo "- 探针主站地址：${KOMARI_ENDPOINT:-未设置}"
   echo
   echo "当前节点信息："
   echo "- 节点名称：${NODE_NAME:-未设置}"
@@ -432,6 +469,46 @@ restore_ssh_password() {
   rm -f "$AKVPS_SSHD_CONF"
   systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
   echo "已恢复 SSH 密码登录配置。"
+}
+
+update_akvps() {
+  need_root
+  info "更新脚本"
+  local tmp_file
+  tmp_file="$(mktemp)"
+  curl -fsSL https://raw.githubusercontent.com/AngKouChan/akvps/main/akvps -o "$tmp_file"
+  install -m 0755 "$tmp_file" /usr/local/bin/akvps
+  rm -f "$tmp_file"
+  echo "akvps 已更新。重新输入 akvps 可打开新版菜单。"
+}
+
+uninstall_akvps() {
+  need_root
+  info "卸载脚本"
+  rm -f /usr/local/bin/akvps
+  echo "akvps 已卸载。3x-ui、Komari 和系统配置不会被删除。"
+}
+
+update_xui() {
+  need_root
+  info "更新 3x-ui"
+  if command -v x-ui >/dev/null 2>&1; then
+    x-ui update
+  elif [[ -x "$XUI_BIN" ]]; then
+    "$XUI_BIN" update
+  else
+    die "没有找到 3x-ui。" "请先部署 3x-ui 主控面板或代理节点。"
+  fi
+}
+
+update_komari_agent() {
+  need_root
+  ensure_dirs
+  load_envs
+  [[ -n "$KOMARI_ENDPOINT" && -n "$KOMARI_TOKEN" ]] || die "缺少 Komari 探针信息。" "请先运行 2. 本机部署 -> 2. 探针Agent。"
+  deploy_komari_agent
+  systemctl restart komari-agent 2>/dev/null || true
+  verify_komari_agent
 }
 
 setup_swap() {
@@ -747,6 +824,29 @@ connect_node_to_master() {
   echo "验证通过：主控已存在节点 $NODE_NAME"
 }
 
+verify_master_connection() {
+  need_root
+  ensure_dirs
+  load_envs
+  require_tools_for_json
+  [[ -n "$PANEL_URL" && -n "$PANEL_API_TOKEN" ]] || die "缺少主控信息。" "请先到 1. 基础设置 -> 3. 主控信息 导入。"
+  [[ -n "$NODE_NAME" ]] || die "缺少节点名称。" "请先部署代理节点。"
+  info "验证接入"
+  local existing_id
+  existing_id="$(xui_api GET "/nodes/list" | jq -r --arg name "$NODE_NAME" '.obj[]? | select(.name == $name) | .id' | head -n1)" || existing_id=""
+  [[ -n "$existing_id" ]] || die "主控里没有找到当前节点。" "请先运行 3. 日常维护 -> 1. 接入主控。"
+  echo "验证通过：主控已存在节点 $NODE_NAME"
+}
+
+verify_komari_agent() {
+  need_root
+  info "验证探针"
+  local status_agent
+  status_agent="$(systemctl is-active komari-agent 2>/dev/null || echo unknown)"
+  [[ "$status_agent" == "active" ]] || die "Komari 探针未正常运行。" "请先运行 2. 本机部署 -> 2. 探针Agent。"
+  echo "验证通过：Komari 探针正在运行。"
+}
+
 delete_old_api_tokens() {
   [[ -f "$XUI_DB" ]] || return 0
   systemctl stop x-ui 2>/dev/null || true
@@ -944,12 +1044,16 @@ EOF
 
 prompt_komari() {
   info "Komari 探针信息"
-  while true; do
-    read -r -p "请输入 Komari 面板地址，例如 https://status.kouzho.cc: " KOMARI_ENDPOINT
-    KOMARI_ENDPOINT="${KOMARI_ENDPOINT%/}"
-    [[ "$KOMARI_ENDPOINT" =~ ^https?://[^[:space:]]+$ ]] && break
-    echo "地址格式不正确，请以 http:// 或 https:// 开头。"
-  done
+  if [[ -n "$KOMARI_ENDPOINT" ]]; then
+    echo "Komari 主站地址：$KOMARI_ENDPOINT"
+  else
+    while true; do
+      read -r -p "请输入 Komari 主站地址，例如 https://status.kouzho.cc: " KOMARI_ENDPOINT
+      KOMARI_ENDPOINT="${KOMARI_ENDPOINT%/}"
+      [[ "$KOMARI_ENDPOINT" =~ ^https?://[^[:space:]]+$ ]] && break
+      echo "地址格式不正确，请以 http:// 或 https:// 开头。"
+    done
+  fi
   while [[ -z "$KOMARI_TOKEN" ]]; do
     read -r -s -p "请输入 Komari 节点 Token: " KOMARI_TOKEN
     echo
@@ -1019,6 +1123,8 @@ generate_komari_server_report() {
   local status_server access_url password
   status_server="$(systemctl is-active komari 2>/dev/null || echo unknown)"
   access_url="http://${KOMARI_SERVER_DOMAIN}:${AKVPS_KOMARI_PORT}"
+  save_config_var "KOMARI_SERVER_DOMAIN" "$KOMARI_SERVER_DOMAIN"
+  save_config_var "KOMARI_ENDPOINT" "$access_url"
   password="$(journalctl -u komari --since "10 minutes ago" 2>/dev/null | grep "admin account created." | tail -n 1 | sed -e 's/.*admin account created.//' | xargs || true)"
   cat > "$KOMARI_SERVER_REPORT_PATH" <<EOF
 # akvps Komari 主站卡片
@@ -1099,20 +1205,28 @@ node_deploy() {
   fi
 }
 
-deploy_panel() {
+local_deploy_menu() {
   while true; do
     echo
-    echo "面板部署"
-    echo "1. 节点面板"
-    echo "2. 主控面板"
+    echo "本机部署"
+    echo "1. 代理节点"
+    echo "2. 探针Agent"
+    echo "3. 主控面板"
+    echo "4. 探针主站"
     echo "0. 返回"
     read -r -p "请选择: " sub
     case "$sub" in
-      1) deploy_node_panel; return ;;
-      2) deploy_master_panel; return ;;
+      1) node_deploy; return ;;
+      2) deploy_komari; return ;;
+      3) deploy_master_panel; return ;;
+      4) deploy_komari_server; return ;;
       0) return ;;
     esac
   done
+}
+
+deploy_panel() {
+  local_deploy_menu
 }
 
 deploy_node_panel() {
@@ -1220,35 +1334,65 @@ view_info_menu() {
   done
 }
 
-probe_menu() {
+maintenance_menu() {
   while true; do
     echo
-    echo "探针部署"
-    echo "1. 探针部署"
-    echo "2. 主站部署"
+    echo "日常维护"
+    echo "1. 接入主控"
+    echo "2. 验证接入"
+    echo "3. 验证探针"
+    echo "4. 恢复密码登录"
     echo "0. 返回"
     read -r -p "请选择: " sub
     case "$sub" in
-      1) deploy_komari; return ;;
-      2) deploy_komari_server; return ;;
+      1) connect_node_to_master; return ;;
+      2) verify_master_connection; return ;;
+      3) verify_komari_agent; return ;;
+      4) restore_ssh_password; return ;;
       0) return ;;
     esac
   done
 }
 
-settings_info_menu() {
+updates_menu() {
   while true; do
     echo
-    echo "信息设置"
-    echo "1. 基础信息"
-    echo "2. 主控信息"
-    echo "3. 查看信息"
+    echo "更新 / 卸载"
+    echo "1. 更新脚本"
+    echo "2. 更新 3x-ui"
+    echo "3. 更新 Komari 探针"
+    echo "4. 卸载脚本"
+    echo "5. 查看版本"
     echo "0. 返回"
     read -r -p "请选择: " sub
     case "$sub" in
-      1) import_basic_info; return ;;
-      2) import_panel_info; return ;;
-      3) view_info_menu; return ;;
+      1) update_akvps; return ;;
+      2) update_xui; return ;;
+      3) update_komari_agent; return ;;
+      4) uninstall_akvps; return ;;
+      5) version; return ;;
+      0) return ;;
+    esac
+  done
+}
+
+basic_settings_menu() {
+  while true; do
+    echo
+    echo "基础设置"
+    echo "1. 一键导入"
+    echo "2. 基础信息"
+    echo "3. 主控信息"
+    echo "4. 探针信息"
+    echo "5. 查看信息"
+    echo "0. 返回"
+    read -r -p "请选择: " sub
+    case "$sub" in
+      1) import_all_info; return ;;
+      2) import_basic_info; return ;;
+      3) import_panel_info; return ;;
+      4) import_komari_info; return ;;
+      5) view_info_menu; return ;;
       0) return ;;
     esac
   done
@@ -1263,26 +1407,18 @@ main_menu() {
     clear 2>/dev/null || true
     echo "Angkou-Vps 轻量版 akvps $AKVPS_VERSION"
     echo
-    echo "0. 信息设置"
-    echo "1. 节点部署"
-    echo "2. 面板部署"
-    echo "3. 探针部署"
-    echo "5. 修复 / 设置 / 更新 / 卸载"
+    echo "1. 基础设置"
+    echo "2. 本机部署"
+    echo "3. 日常维护"
+    echo "4. 更新 / 卸载"
     echo "q. 退出"
     echo
     read -r -p "请选择: " choice
     case "$choice" in
-      0) settings_info_menu; read -r -p "按回车返回菜单..." _ ;;
-      1) node_deploy; read -r -p "按回车返回菜单..." _ ;;
-      2) deploy_panel; read -r -p "按回车返回菜单..." _ ;;
-      3) probe_menu; read -r -p "按回车返回菜单..." _ ;;
-      5)
-        echo "1. 恢复 SSH 密码登录"
-        echo "0. 返回"
-        read -r -p "请选择: " sub
-        [[ "$sub" == "1" ]] && restore_ssh_password
-        read -r -p "按回车返回菜单..." _
-        ;;
+      1) basic_settings_menu; read -r -p "按回车返回菜单..." _ ;;
+      2) local_deploy_menu; read -r -p "按回车返回菜单..." _ ;;
+      3) maintenance_menu; read -r -p "按回车返回菜单..." _ ;;
+      4) updates_menu; read -r -p "按回车返回菜单..." _ ;;
       q|Q) exit 0 ;;
     esac
   done
@@ -1293,15 +1429,19 @@ case "${1:-menu}" in
   check|self-check) self_check ;;
   menu) main_menu ;;
   init|initial-setup|node|node-deploy) node_deploy ;;
-  panel|deploy-panel) deploy_panel ;;
+  panel|deploy-panel|local-deploy) local_deploy_menu ;;
   komari|deploy-komari) deploy_komari ;;
   komari-server|deploy-komari-server) deploy_komari_server ;;
   report) show_latest_report ;;
   panel-report) show_latest_panel_report ;;
   komari-report) show_latest_komari_report ;;
   komari-server-report) show_latest_komari_server_report ;;
-  settings|info-settings) settings_info_menu ;;
+  settings|info-settings|basic-settings) basic_settings_menu ;;
   connect-master|connect-node) connect_node_to_master ;;
+  verify-master|verify-node) verify_master_connection ;;
+  verify-komari) verify_komari_agent ;;
+  update-akvps) update_akvps ;;
+  uninstall-akvps) uninstall_akvps ;;
   restore-ssh-password) restore_ssh_password ;;
   *) main_menu ;;
 esac
