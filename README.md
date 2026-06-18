@@ -65,7 +65,7 @@ akvps
 ## 基础设置做什么
 
 - `一键导入`：一次性粘贴根域名、Cloudflare Token、主控信息、探针信息。
-- `基础信息`：粘贴导入主控 IPv4、Cloudflare Token、根域名。
+- `基础信息`：粘贴导入主控 IPv4、主控 IPv6、Cloudflare Token、根域名。
 - `主控信息`：粘贴导入 3x-ui 主控域名、面板完整地址、API Token。
 - `探针信息`：粘贴导入 Komari 主站域名和主站地址。
 - `查看信息`：查看当前配置、远端节点接入信息、面板卡片、探针卡片、主站卡片；Token 默认遮挡。
@@ -124,7 +124,7 @@ akvps
 
 ## 固定端口
 
-- 3x-ui 被控端面板：`11123/tcp`，只允许主控 IPv4 访问。
+- 3x-ui 被控端面板：`11123/tcp`，只允许主控 IPv4 / IPv6 访问。
 - 3x-ui 主控面板：`11123/tcp`。
 - Komari 主站：`25774/tcp`。
 - VLESS Reality：`11789/tcp`。
@@ -144,7 +144,7 @@ akvps
 ## 真实 VPS 测试前准备
 
 - 一台 Debian 12 或 Ubuntu 24.04 新 VPS。
-- 主控 3x-ui 的 IPv4。
+- 主控 3x-ui 的 IPv4；如果主控有 IPv6，也填 IPv6。
 - Cloudflare Token，权限包含 `Zone Read` 和 `DNS Edit`，作用范围为 `kouzho.cc`。
 - 节点短名，例如 `jp1`。
 - 本地到 VPS 的大概 ping 延迟。

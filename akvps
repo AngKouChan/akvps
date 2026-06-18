@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.12-mvp"
+AKVPS_VERSION="0.1.13-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -27,6 +27,7 @@ XUI_RESULT="/etc/x-ui/install-result.env"
 XUI_DB="/etc/x-ui/x-ui.db"
 
 MASTER_IPV4=""
+MASTER_IPV6=""
 CLOUDFLARE_TOKEN=""
 NODE_NAME=""
 NODE_DOMAIN=""
@@ -98,6 +99,7 @@ load_envs() {
   [[ -f "$AKVPS_SECRETS" ]] && source "$AKVPS_SECRETS" || true
   AKVPS_ROOT_DOMAIN="${AKVPS_ROOT_DOMAIN:-kouzho.cc}"
   MASTER_IPV4="${MASTER_IPV4:-}"
+  MASTER_IPV6="${MASTER_IPV6:-}"
   CLOUDFLARE_TOKEN="${CLOUDFLARE_TOKEN:-}"
   PANEL_DOMAIN="${PANEL_DOMAIN:-}"
   PANEL_URL="${PANEL_URL:-}"
@@ -143,6 +145,10 @@ valid_ipv4() {
   [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
 }
 
+valid_ipv6() {
+  [[ "$1" == *:* ]]
+}
+
 valid_domain() {
   [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
 }
@@ -165,6 +171,12 @@ prompt_config() {
     read -r -p "请输入主控 IPv4: " MASTER_IPV4
   done
   save_config_var "MASTER_IPV4" "$MASTER_IPV4"
+  read -r -p "请输入主控 IPv6（没有可直接回车）: " MASTER_IPV6_INPUT
+  if [[ -n "$MASTER_IPV6_INPUT" ]]; then
+    valid_ipv6 "$MASTER_IPV6_INPUT" || die "主控 IPv6 格式不正确。" "没有 IPv6 可以直接留空。"
+    MASTER_IPV6="$MASTER_IPV6_INPUT"
+    save_config_var "MASTER_IPV6" "$MASTER_IPV6"
+  fi
   prompt_cloudflare_token
 }
 
@@ -190,6 +202,9 @@ save_import_pair() {
       ;;
     MASTER_IPV4|MASTER_IP|MASTER)
       save_config_var "MASTER_IPV4" "$value"
+      ;;
+    MASTER_IPV6|MASTER_IPv6)
+      save_config_var "MASTER_IPV6" "$value"
       ;;
     PANEL_DOMAIN|MASTER_PANEL_DOMAIN)
       save_config_var "PANEL_DOMAIN" "$value"
@@ -250,6 +265,7 @@ import_basic_info() {
   info "基础信息"
   echo "可用字段："
   echo "MASTER_IPV4=主控IPv4"
+  echo "MASTER_IPV6=主控IPv6，没有可不填"
   echo "CLOUDFLARE_TOKEN=Cloudflare Token"
   echo "AKVPS_ROOT_DOMAIN=根域名"
   paste_import_lines "粘贴导入"
@@ -263,6 +279,7 @@ import_all_info() {
   echo "AKVPS_ROOT_DOMAIN=根域名"
   echo "CLOUDFLARE_TOKEN=Cloudflare Token"
   echo "MASTER_IPV4=主控IPv4"
+  echo "MASTER_IPV6=主控IPv6，没有可不填"
   echo "PANEL_DOMAIN=主控域名"
   echo "PANEL_URL=主控面板完整地址"
   echo "PANEL_API_TOKEN=3x-ui 主控 API Token"
@@ -300,6 +317,7 @@ show_saved_info() {
   echo "基础信息："
   echo "- 根域名：$AKVPS_ROOT_DOMAIN"
   echo "- 主控 IPv4：${MASTER_IPV4:-未设置}"
+  echo "- 主控 IPv6：${MASTER_IPV6:-未设置}"
   echo "- Cloudflare Token：$(mask_secret "$CLOUDFLARE_TOKEN")"
   echo
   echo "主控信息："
@@ -628,6 +646,7 @@ setup_ufw() {
   ufw allow 80/tcp comment "acme"
   ufw allow 443/tcp comment "https"
   ufw allow from "$MASTER_IPV4" to any port "$AKVPS_XUI_PORT" proto tcp comment "akvps x-ui master"
+  [[ -n "$MASTER_IPV6" ]] && ufw allow from "$MASTER_IPV6" to any port "$AKVPS_XUI_PORT" proto tcp comment "akvps x-ui master ipv6"
   [[ "$SELECT_VLESS" -eq 1 ]] && ufw allow "$AKVPS_VLESS_PORT/tcp" comment "vless reality"
   [[ "$SELECT_HY2" -eq 1 ]] && ufw allow "$AKVPS_HY2_PORT/udp" comment "hysteria2"
   [[ "$SELECT_HY2_HOP" -eq 1 ]] && ufw allow "$AKVPS_HY2_HOP_START:$AKVPS_HY2_HOP_END/udp" comment "hysteria2 hop"
@@ -762,8 +781,8 @@ url_host_from_url() {
 is_local_master_panel() {
   [[ -x "$XUI_BIN" ]] \
     && [[ -n "$PANEL_URL" && -n "$PANEL_API_TOKEN" ]] \
-    && [[ -n "$MASTER_IPV4" && -n "$PUBLIC_IPV4" ]] \
-    && [[ "$MASTER_IPV4" == "$PUBLIC_IPV4" ]]
+    && { [[ -n "$MASTER_IPV4" && -n "$PUBLIC_IPV4" && "$MASTER_IPV4" == "$PUBLIC_IPV4" ]] \
+      || [[ -n "$MASTER_IPV6" && -n "$PUBLIC_IPV6" && "$MASTER_IPV6" == "$PUBLIC_IPV6" ]]; }
 }
 
 xui_api() {
@@ -1095,6 +1114,7 @@ generate_panel_report() {
 
 \`\`\`env
 MASTER_IPV4=${PUBLIC_IPV4}
+MASTER_IPV6=${PUBLIC_IPV6}
 PANEL_DOMAIN=${PANEL_DOMAIN}
 PANEL_URL=${XUI_ACCESS_URL}
 PANEL_API_TOKEN=${XUI_API_TOKEN}
