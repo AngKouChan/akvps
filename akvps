@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.29-mvp"
+AKVPS_VERSION="0.1.30-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1022,11 +1022,16 @@ connect_node_to_master() {
   [[ -n "$NODE_NAME" && -n "$NODE_DOMAIN" && -n "$NODE_XUI_API_TOKEN" ]] || die "缺少当前节点信息。" "请先运行 2. 本机部署 -> 1. 代理节点。"
 
   info "测试节点连通"
-  local payload response status msg
+  local payload response status msg i
   payload="$(build_node_payload)"
-  response="$(xui_api POST "/nodes/test" "$payload")" || die "无法连接主控面板 API。" "如果上面显示 HTTP 401/403，请重新导入主控机卡片里的完整 PANEL_API_TOKEN。"
-  status="$(printf "%s" "$response" | jq -r '.obj.status // empty')"
-  msg="$(printf "%s" "$response" | jq -r '.obj.error // .obj.xrayError // .msg // empty')"
+  for i in $(seq 1 12); do
+    response="$(xui_api POST "/nodes/test" "$payload")" || die "无法连接主控面板 API。" "如果上面显示 HTTP 401/403，请重新导入主控机卡片里的完整 PANEL_API_TOKEN。"
+    status="$(printf "%s" "$response" | jq -r '.obj.status // empty')"
+    msg="$(printf "%s" "$response" | jq -r '.obj.error // .obj.xrayError // .msg // empty')"
+    [[ "$status" == "online" ]] && break
+    echo "节点暂未就绪，等待重试... $i/12"
+    sleep 5
+  done
   [[ "$status" == "online" ]] || die "主控未能连上这个节点。" "请检查节点域名、11123 端口、节点 API Token。主控返回：${msg:-unknown}"
 
   info "接入主控面板"
