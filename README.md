@@ -124,15 +124,14 @@ akvps
 - 复用 Cloudflare Token，自动新增或更新 DNS，小灰云。
 - 使用 Komari 官方主站安装脚本。
 - 如果本机已经运行 Komari 主站，可选择复用或重装；重装会删除旧 Komari 数据并重新生成账号密码。
-- 默认端口 `25774`。
+- Komari 后端默认端口 `25774`，外部通过 Caddy 自动 HTTPS 访问。
 - 输出 Komari 主站卡片。
-- 暂不配置 HTTPS / 反向代理，后续再补。
 
 ## 固定端口
 
 - 3x-ui 被控端面板：`11123/tcp`，只允许主控 IPv4 / IPv6 访问。
 - 3x-ui 主控面板：`11123/tcp`。
-- Komari 主站：`25774/tcp`。
+- Komari 主站：外部开放 `80/tcp`、`443/tcp`，后端 `25774/tcp` 不直接开放。
 - VLESS Reality：`11789/tcp`。
 - Hysteria2：`11799/udp`。
 - Hysteria2 端口跳跃：`39999-59999/udp`。

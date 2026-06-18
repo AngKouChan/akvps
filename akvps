@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.22-mvp"
+AKVPS_VERSION="0.1.23-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -570,6 +570,13 @@ install_light_tools() {
   timedatectl set-timezone Asia/Shanghai || true
 }
 
+install_komari_server_tools() {
+  info "安装必要工具"
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -q curl ca-certificates caddy
+  timedatectl set-timezone Asia/Shanghai || true
+}
+
 setup_ssh() {
   info "配置 SSH 密钥登录"
   install -d -m 700 /root/.ssh
@@ -792,7 +799,8 @@ setup_komari_server_ufw() {
   ufw default deny incoming
   ufw default allow outgoing
   ufw allow "$ssh_port/tcp" comment "ssh"
-  ufw allow "$AKVPS_KOMARI_PORT/tcp" comment "komari server"
+  ufw allow 80/tcp comment "http"
+  ufw allow 443/tcp comment "https"
   ufw --force enable
   ufw reload
 }
@@ -1351,13 +1359,28 @@ install_komari_server() {
   systemctl is-active --quiet komari 2>/dev/null || die "Komari 主站安装后未运行。" "请查看 journalctl -u komari -n 80。"
 }
 
+setup_komari_caddy() {
+  info "配置 Komari HTTPS"
+  mkdir -p /etc/caddy
+  cat > /etc/caddy/Caddyfile <<EOF
+${KOMARI_SERVER_DOMAIN} {
+  reverse_proxy 127.0.0.1:${AKVPS_KOMARI_PORT}
+}
+EOF
+  systemctl enable caddy >/dev/null 2>&1 || true
+  systemctl restart caddy
+  sleep 3
+  curl -fsS --max-time 15 "https://${KOMARI_SERVER_DOMAIN}" >/dev/null \
+    || die "Komari HTTPS 暂未成功。" "请稍后访问 https://${KOMARI_SERVER_DOMAIN}，或查看 journalctl -u caddy -n 80。"
+}
+
 generate_komari_server_report() {
   info "生成 Komari 主站卡片"
   KOMARI_SERVER_REPORT_PATH="$AKVPS_REPORT_DIR/$(date +%F-%H%M%S)-komari-server-${KOMARI_SERVER_NAME}.md"
   local status_server access_url password password_text
   status_server="$(systemctl is-active komari 2>/dev/null || echo unknown)"
   [[ "$status_server" == "active" ]] || die "Komari 主站未正常运行。" "请查看 journalctl -u komari -n 80。"
-  access_url="http://${KOMARI_SERVER_DOMAIN}:${AKVPS_KOMARI_PORT}"
+  access_url="https://${KOMARI_SERVER_DOMAIN}"
   save_config_var "KOMARI_SERVER_DOMAIN" "$KOMARI_SERVER_DOMAIN"
   save_config_var "KOMARI_ENDPOINT" "$access_url"
   password="$(journalctl -u komari --since "10 minutes ago" 2>/dev/null \
@@ -1523,11 +1546,12 @@ deploy_komari_server() {
   check_system
   detect_public_ips
   prompt_komari_server
-  install_light_tools
+  install_komari_server_tools
   setup_komari_server_ufw
   setup_dns_for_domain "$KOMARI_SERVER_DOMAIN"
   wait_dns_for_domain "$KOMARI_SERVER_DOMAIN"
   install_komari_server
+  setup_komari_caddy
   generate_komari_server_report
   save_state_var "ROLE_KOMARI_SERVER" "1"
 }
