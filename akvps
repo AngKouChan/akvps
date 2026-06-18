@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.32-mvp"
+AKVPS_VERSION="0.1.33-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -346,7 +346,6 @@ import_all_info() {
   echo "KOMARI_SERVER_DOMAIN=探针主站域名"
   echo "KOMARI_ENDPOINT=探针主站地址"
   echo "KOMARI_AUTO_DISCOVERY_KEY=Komari 自动发现密钥"
-  echo "KOMARI_MONTH_ROTATE=网络统计月重置日，0 表示禁用"
   paste_import_lines "粘贴导入"
 }
 
@@ -1346,11 +1345,8 @@ prompt_komari() {
     done
   fi
   save_config_var "KOMARI_ENDPOINT" "$KOMARI_ENDPOINT"
+  KOMARI_MONTH_ROTATE=""
   while true; do
-    if [[ -n "$KOMARI_MONTH_ROTATE" ]]; then
-      echo "网络统计月重置日：$KOMARI_MONTH_ROTATE"
-      break
-    fi
     read -r -p "请输入网络统计月重置日，0=禁用，1-31=每月日期: " KOMARI_MONTH_ROTATE
     if [[ "$KOMARI_MONTH_ROTATE" =~ ^([0-9]|[12][0-9]|3[01])$ ]]; then
       break
@@ -1377,13 +1373,15 @@ deploy_komari_agent() {
       -e "$KOMARI_ENDPOINT" \
       --auto-discovery "$KOMARI_AUTO_DISCOVERY_KEY" \
       --disable-web-ssh \
-      --month-rotate "$KOMARI_MONTH_ROTATE"
+      --month-rotate "$KOMARI_MONTH_ROTATE" \
+      2>&1 | sed "s/${KOMARI_AUTO_DISCOVERY_KEY}/$(mask_secret "$KOMARI_AUTO_DISCOVERY_KEY")/g"
   else
     bash <(curl -fsSL https://raw.githubusercontent.com/komari-monitor/komari-agent/main/install.sh) \
       -e "$KOMARI_ENDPOINT" \
       -t "$KOMARI_TOKEN" \
       --disable-web-ssh \
-      --month-rotate "$KOMARI_MONTH_ROTATE"
+      --month-rotate "$KOMARI_MONTH_ROTATE" \
+      2>&1 | sed "s/${KOMARI_TOKEN}/$(mask_secret "$KOMARI_TOKEN")/g"
   fi
 }
 
@@ -1721,7 +1719,6 @@ PANEL_API_TOKEN=${PANEL_API_TOKEN}
 KOMARI_SERVER_DOMAIN=${KOMARI_SERVER_DOMAIN}
 KOMARI_ENDPOINT=${KOMARI_ENDPOINT}
 KOMARI_AUTO_DISCOVERY_KEY=${KOMARI_AUTO_DISCOVERY_KEY}
-KOMARI_MONTH_ROTATE=${KOMARI_MONTH_ROTATE}
 END
 EOF
 }
