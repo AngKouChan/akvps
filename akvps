@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.28-mvp"
+AKVPS_VERSION="0.1.29-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1004,7 +1004,7 @@ build_node_payload() {
       apiToken: $apiToken,
       enable: true,
       allowPrivateAddress: false,
-      tlsVerifyMode: "verify",
+      tlsVerifyMode: "skip",
       pinnedCertSha256: "",
       inboundSyncMode: "all",
       inboundTags: [],
@@ -1026,7 +1026,7 @@ connect_node_to_master() {
   payload="$(build_node_payload)"
   response="$(xui_api POST "/nodes/test" "$payload")" || die "无法连接主控面板 API。" "如果上面显示 HTTP 401/403，请重新导入主控机卡片里的完整 PANEL_API_TOKEN。"
   status="$(printf "%s" "$response" | jq -r '.obj.status // empty')"
-  msg="$(printf "%s" "$response" | jq -r '.msg // empty')"
+  msg="$(printf "%s" "$response" | jq -r '.obj.error // .obj.xrayError // .msg // empty')"
   [[ "$status" == "online" ]] || die "主控未能连上这个节点。" "请检查节点域名、11123 端口、节点 API Token。主控返回：${msg:-unknown}"
 
   info "接入主控面板"
@@ -1217,7 +1217,7 @@ generate_report() {
 | 端口 | ${AKVPS_XUI_PORT} |
 | 基础路径 | /${XUI_WEB_BASE_PATH}/ |
 | API Token | ${XUI_API_TOKEN} |
-| TLS 校验 | verify |
+| TLS 校验 | skip |
 | 入站同步 | all |
 | 允许私网地址 | false |"
   fi
