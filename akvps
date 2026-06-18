@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.26-mvp"
+AKVPS_VERSION="0.1.27-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -960,6 +960,17 @@ xui_api() {
     fi
   done < <(api_base_candidates)
   echo "主控 API 返回 HTTP ${best_status:-unknown}。" >&2
+  case "$best_status" in
+    401|403)
+      echo "判断：主控 API Token 不正确、已失效，或主控面板没有启用这个 Token。" >&2
+      ;;
+    404)
+      echo "判断：主控 API 地址可能不对，或主控面板基础路径不对。" >&2
+      ;;
+    000|"")
+      echo "判断：无法连到主控面板，请检查主控 IP、端口和防火墙。" >&2
+      ;;
+  esac
   [[ -n "$best_body" ]] && echo "主控返回：$(printf "%s" "$best_body" | tr '\n' ' ' | head -c 160)" >&2
   echo "已尝试地址：" >&2
   printf "%s" "$tried" >&2
@@ -1007,7 +1018,7 @@ connect_node_to_master() {
   info "测试节点连通"
   local payload response status msg
   payload="$(build_node_payload)"
-  response="$(xui_api POST "/nodes/test" "$payload")" || die "无法连接主控面板 API。" "请检查主控地址、主控 API Token 和防火墙。"
+  response="$(xui_api POST "/nodes/test" "$payload")" || die "无法连接主控面板 API。" "如果上面显示 HTTP 401/403，请重新导入主控机卡片里的完整 PANEL_API_TOKEN。"
   status="$(printf "%s" "$response" | jq -r '.obj.status // empty')"
   msg="$(printf "%s" "$response" | jq -r '.msg // empty')"
   [[ "$status" == "online" ]] || die "主控未能连上这个节点。" "请检查节点域名、11123 端口、节点 API Token。主控返回：${msg:-unknown}"
@@ -1016,10 +1027,10 @@ connect_node_to_master() {
   local existing_id action
   existing_id="$(xui_api GET "/nodes/list" | jq -r --arg name "$NODE_NAME" '.obj[]? | select(.name == $name) | .id' | head -n1)" || existing_id=""
   if [[ -n "$existing_id" ]]; then
-    response="$(xui_api POST "/nodes/update/${existing_id}" "$payload")" || die "主控更新节点失败。" "请检查主控 API Token 是否有效。"
+    response="$(xui_api POST "/nodes/update/${existing_id}" "$payload")" || die "主控更新节点失败。" "请重新导入主控机卡片里的完整 PANEL_API_TOKEN。"
     action="已更新"
   else
-    response="$(xui_api POST "/nodes/add" "$payload")" || die "主控添加节点失败。" "请检查主控 API Token 是否有效。"
+    response="$(xui_api POST "/nodes/add" "$payload")" || die "主控添加节点失败。" "请重新导入主控机卡片里的完整 PANEL_API_TOKEN。"
     action="已添加"
   fi
   if printf "%s" "$response" | json_success; then
