@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.23-mvp"
+AKVPS_VERSION="0.1.24-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1361,17 +1361,25 @@ install_komari_server() {
 
 setup_komari_caddy() {
   info "配置 Komari HTTPS"
+  local i
   mkdir -p /etc/caddy
   cat > /etc/caddy/Caddyfile <<EOF
 ${KOMARI_SERVER_DOMAIN} {
   reverse_proxy 127.0.0.1:${AKVPS_KOMARI_PORT}
 }
 EOF
+  caddy validate --config /etc/caddy/Caddyfile >/dev/null
   systemctl enable caddy >/dev/null 2>&1 || true
   systemctl restart caddy
-  sleep 3
-  curl -fsS --max-time 15 "https://${KOMARI_SERVER_DOMAIN}" >/dev/null \
-    || die "Komari HTTPS 暂未成功。" "请稍后访问 https://${KOMARI_SERVER_DOMAIN}，或查看 journalctl -u caddy -n 80。"
+  for i in $(seq 1 24); do
+    if curl -fsS --max-time 10 "https://${KOMARI_SERVER_DOMAIN}" >/dev/null 2>&1; then
+      echo "Komari HTTPS 已生效：https://${KOMARI_SERVER_DOMAIN}"
+      return 0
+    fi
+    echo "等待 HTTPS 生效中... $i/24"
+    sleep 5
+  done
+  die "Komari HTTPS 暂未成功。" "请稍后访问 https://${KOMARI_SERVER_DOMAIN}，或查看 journalctl -u caddy -n 80。"
 }
 
 generate_komari_server_report() {
