@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.81-mvp"
+AKVPS_VERSION="0.1.82-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -2280,8 +2280,10 @@ client_link_status_word() {
   response="$(xui_api GET "/clients/links/${encoded_email}" 2>/dev/null || true)"
   if client_links_are_complete "$response" "$kind" "$scheme"; then
     printf "已生成"
-  else
+  elif printf "%s" "$response" | jq -e '.success == true' >/dev/null 2>&1; then
     printf "未生成"
+  else
+    printf "未确认"
   fi
 }
 
