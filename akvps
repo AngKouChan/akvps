@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.84-mvp"
+AKVPS_VERSION="0.1.85-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -2152,11 +2152,7 @@ repair_master_client() {
   encoded_email="$(url_encode "$email")"
   client_json="$(client_get_json "$email")" || return 1
   [[ -n "$client_json" ]] || return 1
-  if client_credentials_complete "$client_json" "$kind"; then
-    inbound_client_complete "$inbound_id" "$email" "$kind" || {
-      echo "入站内客户端资料不完整：$email"
-      return 1
-    }
+  if client_credentials_complete "$client_json" "$kind" && inbound_client_complete "$inbound_id" "$email" "$kind"; then
     return 0
   fi
   payload="$(client_update_payload "$client_json" "$kind" "$flow")"
