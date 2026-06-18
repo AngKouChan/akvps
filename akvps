@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.40-mvp"
+AKVPS_VERSION="0.1.41-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1000,6 +1000,33 @@ random_string() {
   openssl rand -hex 64 | cut -c "1-${1:-18}"
 }
 
+random_uuid() {
+  if command -v uuidgen >/dev/null 2>&1; then
+    uuidgen | tr 'A-Z' 'a-z'
+  else
+    openssl rand -hex 16 | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/'
+  fi
+}
+
+xray_bin() {
+  command -v xray 2>/dev/null || command -v /usr/local/bin/xray 2>/dev/null || command -v /usr/local/x-ui/bin/xray 2>/dev/null || true
+}
+
+generate_reality_keys() {
+  local bin out private public
+  bin="$(xray_bin)"
+  if [[ -n "$bin" ]]; then
+    out="$("$bin" x25519 2>/dev/null || true)"
+    private="$(printf "%s" "$out" | awk -F': ' '/Private key/ {print $2; exit}')"
+    public="$(printf "%s" "$out" | awk -F': ' '/Public key/ {print $2; exit}')"
+  fi
+  if [[ -z "$private" || -z "$public" ]]; then
+    private=""
+    public=""
+  fi
+  printf "%s|%s" "$private" "$public"
+}
+
 json_success() {
   jq -e '.success == true' >/dev/null 2>&1
 }
@@ -1133,17 +1160,35 @@ master_inbound_id_by_tag() {
 }
 
 build_minimal_inbound_payload() {
-  local node_id="$1" kind="$2" tag="$3" remark="$4" port="$5" protocol settings stream sniffing
+  local node_id="$1" kind="$2" tag="$3" remark="$4" port="$5" inbound_id="${6:-0}"
+  local protocol settings stream sniffing client_id client_email sub_id short_id key_pair private_key public_key hy_auth
   sniffing='{"enabled":true,"destOverride":["http","tls","quic","fakedns"],"metadataOnly":false,"routeOnly":false}'
   case "$kind" in
     vless)
       protocol="vless"
-      settings='{"clients":[],"decryption":"none","fallbacks":[]}'
-      stream='{"network":"tcp","security":"reality","tcpSettings":{"acceptProxyProtocol":false,"header":{"type":"none"}},"realitySettings":{"show":false,"xver":0,"dest":"www.microsoft.com:443","serverNames":["www.microsoft.com"],"privateKey":"","minClient":"","maxClient":"","maxTimediff":0,"shortIds":[""],"settings":{"publicKey":"","fingerprint":"chrome","serverName":"","spiderX":"/"}}}'
+      client_id="$(random_uuid)"
+      client_email="${NODE_NAME}-vless"
+      sub_id="$(random_string 16)"
+      short_id="$(random_string 8)"
+      key_pair="$(generate_reality_keys)"
+      private_key="${key_pair%%|*}"
+      public_key="${key_pair#*|}"
+      settings="$(jq -cn \
+        --arg id "$client_id" \
+        --arg email "$client_email" \
+        --arg subId "$sub_id" \
+        '{clients:[{id:$id,email:$email,enable:true,flow:"xtls-rprx-vision",limitIp:0,totalGB:0,expiryTime:0,subId:$subId,tgId:"",reset:0}],decryption:"none",fallbacks:[],testseed:[900,500,900,256]}')"
+      stream="$(jq -cn \
+        --arg privateKey "$private_key" \
+        --arg publicKey "$public_key" \
+        --arg shortId "$short_id" \
+        '{network:"tcp",security:"reality",tcpSettings:{acceptProxyProtocol:false,header:{type:"none"}},realitySettings:{show:false,xver:0,dest:"www.microsoft.com:443",serverNames:["www.microsoft.com"],privateKey:$privateKey,minClient:"",maxClient:"",maxTimediff:0,shortIds:[$shortId],settings:{publicKey:$publicKey,fingerprint:"chrome",serverName:"",spiderX:"/"}}}')"
       ;;
     hy2|hy2hop)
       protocol="hysteria"
-      settings='{"clients":[],"ignoreClientBandwidth":false}'
+      client_email="${NODE_NAME}-${kind}"
+      hy_auth="$(random_string 16)"
+      settings="$(jq -cn --arg email "$client_email" --arg auth "$hy_auth" '{clients:[{email:$email,enable:true,auth:$auth,limitIp:0,totalGB:0,expiryTime:0,subId:"",tgId:"",reset:0}],ignoreClientBandwidth:false}')"
       stream='{"network":"udp","security":"tls","tlsSettings":{"serverName":"","minVersion":"1.2","maxVersion":"1.3","cipherSuites":"","certificates":[],"alpn":["h3"],"settings":{}}}'
       ;;
     *)
@@ -1157,9 +1202,11 @@ build_minimal_inbound_payload() {
     --arg streamSettings "$stream" \
     --arg tag "$tag" \
     --arg sniffing "$sniffing" \
+    --argjson id "$inbound_id" \
     --argjson nodeId "$node_id" \
     --argjson port "$port" \
     '{
+      id: $id,
       up: 0,
       down: 0,
       total: 0,
@@ -1181,19 +1228,24 @@ build_minimal_inbound_payload() {
 }
 
 ensure_master_inbound() {
-  local node_id="$1" kind="$2" tag="$3" remark="$4" port="$5" payload response msg
-  if [[ -n "$(master_inbound_id_by_tag "$tag" 2>/dev/null || true)" ]]; then
-    echo "入站已存在：$tag"
-    return 0
+  local node_id="$1" kind="$2" tag="$3" remark="$4" port="$5" payload response msg inbound_id path action
+  inbound_id="$(master_inbound_id_by_tag "$tag" 2>/dev/null || true)"
+  if [[ -n "$inbound_id" ]]; then
+    path="/inbounds/update/${inbound_id}"
+    action="已更新"
+  else
+    inbound_id=0
+    path="/inbounds/add"
+    action="已创建"
   fi
-  payload="$(build_minimal_inbound_payload "$node_id" "$kind" "$tag" "$remark" "$port")" || return 1
-  response="$(xui_api POST "/inbounds/add" "$payload")" || return 1
+  payload="$(build_minimal_inbound_payload "$node_id" "$kind" "$tag" "$remark" "$port" "$inbound_id")" || return 1
+  response="$(xui_api POST "$path" "$payload")" || return 1
   if printf "%s" "$response" | json_success; then
-    echo "已创建入站：$remark"
+    echo "${action}入站：$remark"
     return 0
   fi
   msg="$(printf "%s" "$response" | jq -r '.msg // empty')"
-  echo "入站创建失败：${msg:-unknown}"
+  echo "入站保存失败：${msg:-unknown}"
   return 1
 }
 
