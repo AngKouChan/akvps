@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.74-mvp"
+AKVPS_VERSION="0.1.75-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -2473,6 +2473,51 @@ delete_old_api_tokens() {
   sqlite3 "$XUI_DB" "delete from api_tokens;" >/dev/null 2>&1 || true
 }
 
+read_xui_result_api_token() {
+  [[ -r "$XUI_RESULT" ]] || return 0
+  (
+    # shellcheck disable=SC1090
+    source "$XUI_RESULT" 2>/dev/null || exit 0
+    printf "%s" "${XUI_API_TOKEN:-}"
+  )
+}
+
+get_xui_api_token() {
+  local output token
+  output="$("$XUI_BIN" setting -getApiToken true 2>/dev/null || true)"
+  token="$(printf "%s\n" "$output" | awk '/apiToken:/ {print $2; exit}')"
+  [[ -n "$token" ]] || token="$(read_xui_result_api_token)"
+  [[ -n "$token" ]] || die "未能生成 3x-ui API Token。" "请检查 3x-ui 是否正常运行。"
+  printf "%s" "$token"
+}
+
+verify_local_xui_api_token() {
+  local port="$1" web_base_path="$2" token="$3"
+  local base url response status body
+  base="${web_base_path#/}"
+  base="${base%/}"
+  url="https://127.0.0.1:${port}"
+  [[ -n "$base" ]] && url="${url}/${base}"
+  url="${url}/panel/api/server/status"
+
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    response="$(curl -ksS --connect-timeout 2 --max-time 8 \
+      -H "Authorization: Bearer ${token}" \
+      -H "Accept: application/json" \
+      -w $'\n%{http_code}' "$url" 2>/dev/null || true)"
+    status="$(printf "%s" "$response" | tail -n 1)"
+    body="$(printf "%s" "$response" | sed '$d')"
+    if [[ "$status" =~ ^2[0-9][0-9]$ ]] && printf "%s" "$body" | json_success; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "本机 3x-ui API Token 验证失败，HTTP ${status:-unknown}。" >&2
+  [[ -n "$body" ]] && echo "本机返回：$(printf "%s" "$body" | tr '\n' ' ' | head -c 160)" >&2
+  return 1
+}
+
 install_or_configure_xui() {
   info "安装/配置 3x-ui 远端节点端"
   if is_local_master_panel; then
@@ -2512,10 +2557,11 @@ install_or_configure_xui() {
   [[ -x "$XUI_BIN" ]] || die "3x-ui 安装后未找到 x-ui 命令。" "请检查官方安装脚本输出。"
   "$XUI_BIN" setting -username "$XUI_USERNAME" -password "$XUI_PASSWORD" -port "$AKVPS_XUI_PORT" -webBasePath "$XUI_WEB_BASE_PATH"
   delete_old_api_tokens
-  XUI_API_TOKEN="$("$XUI_BIN" setting -getApiToken true 2>/dev/null | awk '/apiToken:/ {print $2; exit}')"
-  [[ -n "$XUI_API_TOKEN" ]] || die "未能生成 3x-ui API Token。" "请检查 3x-ui 是否正常运行。"
+  XUI_API_TOKEN="$(get_xui_api_token)"
   systemctl restart x-ui 2>/dev/null || true
   XUI_ACCESS_URL="https://${NODE_DOMAIN}:${AKVPS_XUI_PORT}/${XUI_WEB_BASE_PATH}"
+  verify_local_xui_api_token "$AKVPS_XUI_PORT" "$XUI_WEB_BASE_PATH" "$XUI_API_TOKEN" \
+    || die "3x-ui API Token 已生成，但本机验证未通过。" "请检查 3x-ui 服务状态、面板端口和基础路径。"
   save_config_var "NODE_NAME" "$NODE_NAME"
   save_config_var "NODE_DOMAIN" "$NODE_DOMAIN"
   save_config_var "NODE_XUI_URL" "$XUI_ACCESS_URL"
@@ -2559,10 +2605,11 @@ install_or_configure_panel_xui() {
   [[ -x "$XUI_BIN" ]] || die "3x-ui 安装后未找到 x-ui 命令。" "请检查官方安装脚本输出。"
   "$XUI_BIN" setting -username "$XUI_USERNAME" -password "$XUI_PASSWORD" -port "$AKVPS_PANEL_PORT" -webBasePath "$XUI_WEB_BASE_PATH"
   delete_old_api_tokens
-  XUI_API_TOKEN="$("$XUI_BIN" setting -getApiToken true 2>/dev/null | awk '/apiToken:/ {print $2; exit}')"
-  [[ -n "$XUI_API_TOKEN" ]] || die "未能生成 3x-ui API Token。" "请检查 3x-ui 是否正常运行。"
+  XUI_API_TOKEN="$(get_xui_api_token)"
   systemctl restart x-ui 2>/dev/null || true
   XUI_ACCESS_URL="https://${PANEL_DOMAIN}:${AKVPS_PANEL_PORT}/${XUI_WEB_BASE_PATH}"
+  verify_local_xui_api_token "$AKVPS_PANEL_PORT" "$XUI_WEB_BASE_PATH" "$XUI_API_TOKEN" \
+    || die "3x-ui API Token 已生成，但本机验证未通过。" "请检查 3x-ui 服务状态、面板端口和基础路径。"
   save_config_var "PANEL_DOMAIN" "$PANEL_DOMAIN"
   save_config_var "PANEL_URL" "$XUI_ACCESS_URL"
   save_secret_var "PANEL_API_TOKEN" "$XUI_API_TOKEN"
