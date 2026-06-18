@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.33-mvp"
+AKVPS_VERSION="0.1.34-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -368,7 +368,6 @@ import_komari_info() {
   echo "KOMARI_SERVER_DOMAIN=探针主站域名"
   echo "KOMARI_ENDPOINT=探针主站地址，例如 https://status.kouzho.cc"
   echo "KOMARI_AUTO_DISCOVERY_KEY=Komari 自动发现密钥"
-  echo "KOMARI_MONTH_ROTATE=网络统计月重置日，0 表示禁用"
   paste_import_lines "粘贴导入"
 }
 
@@ -418,6 +417,24 @@ service_label() {
   fi
 }
 
+service_word() {
+  local service="$1"
+  if systemctl is-active --quiet "$service" 2>/dev/null; then
+    echo "运行"
+  else
+    echo "未运行"
+  fi
+}
+
+role_status_text() {
+  local role="$1" service="$2"
+  if [[ -n "$role" ]]; then
+    echo "已登记"
+  else
+    echo "未登记，服务${service}"
+  fi
+}
+
 append_role() {
   local current="$1" color="$2" label="$3"
   if [[ -n "$current" ]]; then
@@ -430,11 +447,15 @@ append_role() {
 show_dashboard() {
   load_envs
   local ipv4 ipv6 xui_status komari_agent_status komari_server_status roles role_master role_node role_agent role_komari_server
+  local xui_word komari_agent_word komari_server_word
   ipv4="$(curl -4 -fsS --max-time 2 https://api4.ipify.org 2>/dev/null || true)"
   ipv6="$(curl -6 -fsS --max-time 2 https://api6.ipify.org 2>/dev/null || true)"
   xui_status="$(service_label x-ui)"
   komari_agent_status="$(service_label komari-agent)"
   komari_server_status="$(service_label komari)"
+  xui_word="$(service_word x-ui)"
+  komari_agent_word="$(service_word komari-agent)"
+  komari_server_word="$(service_word komari)"
   role_master="$([[ "$ROLE_MASTER_PANEL" == "1" ]] && echo yes || true)"
   role_node="$([[ "$ROLE_NODE" == "1" ]] && echo yes || true)"
   role_agent="$([[ "$ROLE_KOMARI_AGENT" == "1" ]] && echo yes || true)"
@@ -443,7 +464,7 @@ show_dashboard() {
   [[ "$ROLE_MASTER_PANEL" == "1" ]] && roles="$(append_role "$roles" blue "主控面板")"
   [[ "$ROLE_KOMARI_SERVER" == "1" ]] && roles="$(append_role "$roles" magenta "探针主站")"
   [[ "$ROLE_NODE" == "1" ]] && roles="$(append_role "$roles" cyan "代理节点")"
-  [[ "$ROLE_KOMARI_AGENT" == "1" ]] && roles="$(append_role "$roles" green "探针Agent")"
+  [[ "$ROLE_KOMARI_AGENT" == "1" ]] && roles="$(append_role "$roles" green "探针节点")"
 
   echo "本机状态"
   echo "- 本机角色：${roles:-$(color_text yellow "未部署")}"
@@ -451,10 +472,10 @@ show_dashboard() {
   echo "- IPv6：${ipv6:-未检测到}"
   echo "- 基础信息：$(status_label "$MASTER_IPV4") 主控IPv4  $(status_label "$CLOUDFLARE_TOKEN") Cloudflare Token"
   echo "- 远端信息：$(status_label "$PANEL_URL") 主控信息  $(status_label "$KOMARI_ENDPOINT") 探针主站地址"
-  echo "- 本机主控：$(status_label "$role_master") 面板角色  ${xui_status} 3x-ui服务"
+  echo "- 本机主控：$(status_label "$role_master") 面板角色  ${xui_status} 3x-ui服务（$(role_status_text "$role_master" "$xui_word")）"
   echo "- 本机节点：$(status_label "$role_node") 节点角色"
-  echo "- 本机探针Agent：$(status_label "$role_agent") Agent角色  ${komari_agent_status} Agent服务"
-  echo "- 本机探针主站：$(status_label "$role_komari_server") 主站角色  ${komari_server_status} 主站服务"
+  echo "- 本机探针节点：$(status_label "$role_agent") 节点角色  ${komari_agent_status} Agent服务（$(role_status_text "$role_agent" "$komari_agent_word")）"
+  echo "- 本机探针主站：$(status_label "$role_komari_server") 主站角色  ${komari_server_status} 主站服务（$(role_status_text "$role_komari_server" "$komari_server_word")）"
   echo
 }
 
@@ -686,7 +707,7 @@ update_komari_agent() {
   ensure_dirs
   load_envs
   [[ -n "$KOMARI_ENDPOINT" ]] || die "缺少 Komari 主站地址。" "请先到 1. 基础设置 -> 4. 探针信息 导入 KOMARI_ENDPOINT。"
-  [[ -n "$KOMARI_AUTO_DISCOVERY_KEY" || -n "$KOMARI_TOKEN" ]] || die "缺少 Komari 接入密钥。" "请先导入 KOMARI_AUTO_DISCOVERY_KEY，或运行探针Agent手动输入 Token。"
+  [[ -n "$KOMARI_AUTO_DISCOVERY_KEY" || -n "$KOMARI_TOKEN" ]] || die "缺少 Komari 接入密钥。" "请先导入 KOMARI_AUTO_DISCOVERY_KEY，或运行探针节点手动输入 Token。"
   deploy_komari_agent
   systemctl restart komari-agent 2>/dev/null || true
   verify_komari_agent
@@ -1092,7 +1113,7 @@ verify_komari_agent() {
   info "验证探针"
   local status_agent
   status_agent="$(systemctl is-active komari-agent 2>/dev/null || echo unknown)"
-  [[ "$status_agent" == "active" ]] || die "Komari 探针未正常运行。" "请先运行 2. 本机部署 -> 2. 探针Agent。"
+  [[ "$status_agent" == "active" ]] || die "Komari 探针未正常运行。" "请先运行 2. 本机部署 -> 2. 探针节点。"
   echo "验证通过：Komari 探针正在运行。"
 }
 
@@ -1596,6 +1617,13 @@ node_deploy() {
     echo "提示：主控信息未配置，已跳过一键接入主控。"
     echo "需要时可到 1. 基础设置 -> 3. 主控信息 导入后重新运行节点部署。"
   fi
+  if [[ "$ROLE_KOMARI_AGENT" != "1" && -n "$KOMARI_ENDPOINT" ]]; then
+    echo
+    read -r -p "是否继续部署探针节点？[y/N] " ans
+    if [[ "$ans" =~ ^[Yy]$ ]]; then
+      deploy_komari
+    fi
+  fi
 }
 
 local_deploy_menu() {
@@ -1603,7 +1631,7 @@ local_deploy_menu() {
     echo
     echo "本机部署"
     echo "1. 代理节点"
-    echo "2. 探针Agent"
+    echo "2. 探针节点"
     echo "3. 主控面板"
     echo "4. 探针主站"
     echo "0. 返回"
@@ -1704,7 +1732,7 @@ show_latest_panel_report() {
 show_master_import_card() {
   load_envs
   if [[ -z "$PANEL_URL" || -z "$PANEL_API_TOKEN" ]]; then
-    echo "还没有主控导入信息。"
+    echo "还没有新 VPS 一键导入信息。"
     echo "请先在本机部署主控面板。"
     return
   fi
@@ -1736,10 +1764,10 @@ view_info_menu() {
     echo
     echo "查看信息"
     echo "1. 当前配置"
-    echo "2. 主控导入卡片"
+    echo "2. 新 VPS 一键导入卡片"
     echo "3. 节点接入报告"
     echo "4. 主控面板卡片"
-    echo "5. 探针Agent卡片"
+    echo "5. 探针节点卡片"
     echo "6. 探针主站卡片"
     echo "0. 返回"
     read -r -p "请选择: " sub
