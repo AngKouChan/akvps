@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.15-mvp"
+AKVPS_VERSION="0.1.16-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -117,6 +117,7 @@ ensure_dirs() {
 }
 
 load_envs() {
+  [[ -r "$AKVPS_STATE" ]] && source "$AKVPS_STATE" || true
   [[ -r "$AKVPS_CONFIG" ]] && source "$AKVPS_CONFIG" || true
   [[ -r "$AKVPS_SECRETS" ]] && source "$AKVPS_SECRETS" || true
   AKVPS_ROOT_DOMAIN="${AKVPS_ROOT_DOMAIN:-kouzho.cc}"
@@ -133,6 +134,10 @@ load_envs() {
   KOMARI_SERVER_DOMAIN="${KOMARI_SERVER_DOMAIN:-}"
   KOMARI_ENDPOINT="${KOMARI_ENDPOINT:-}"
   KOMARI_TOKEN="${KOMARI_TOKEN:-}"
+  ROLE_MASTER_PANEL="${ROLE_MASTER_PANEL:-0}"
+  ROLE_NODE="${ROLE_NODE:-0}"
+  ROLE_KOMARI_AGENT="${ROLE_KOMARI_AGENT:-0}"
+  ROLE_KOMARI_SERVER="${ROLE_KOMARI_SERVER:-0}"
 }
 
 save_config_var() {
@@ -161,6 +166,20 @@ save_secret_var() {
   fi
   rm -f "$AKVPS_SECRETS.bak"
   chmod 600 "$AKVPS_SECRETS"
+}
+
+save_state_var() {
+  local key="$1" value="$2"
+  local escaped
+  printf -v escaped "%q" "$value"
+  touch "$AKVPS_STATE"
+  if grep -q "^${key}=" "$AKVPS_STATE"; then
+    sed -i.bak "s|^${key}=.*|${key}=${escaped}|" "$AKVPS_STATE"
+  else
+    printf "%s=%s\n" "$key" "$escaped" >> "$AKVPS_STATE"
+  fi
+  rm -f "$AKVPS_STATE.bak"
+  chmod 600 "$AKVPS_STATE"
 }
 
 valid_ipv4() {
@@ -393,10 +412,10 @@ show_dashboard() {
   komari_agent_status="$(service_label komari-agent)"
   komari_server_status="$(service_label komari)"
   roles=""
-  [[ -n "$PANEL_URL" ]] && roles="$(append_role "$roles" blue "主控面板")"
-  [[ -n "$KOMARI_SERVER_DOMAIN" ]] && roles="$(append_role "$roles" magenta "探针主站")"
-  [[ -n "$NODE_XUI_URL" ]] && roles="$(append_role "$roles" cyan "代理节点")"
-  [[ -n "$KOMARI_TOKEN" ]] && roles="$(append_role "$roles" green "探针Agent")"
+  [[ "$ROLE_MASTER_PANEL" == "1" ]] && roles="$(append_role "$roles" blue "主控面板")"
+  [[ "$ROLE_KOMARI_SERVER" == "1" ]] && roles="$(append_role "$roles" magenta "探针主站")"
+  [[ "$ROLE_NODE" == "1" ]] && roles="$(append_role "$roles" cyan "代理节点")"
+  [[ "$ROLE_KOMARI_AGENT" == "1" ]] && roles="$(append_role "$roles" green "探针Agent")"
 
   echo "本机状态"
   echo "- 本机角色：${roles:-$(color_text yellow "未部署")}"
@@ -592,6 +611,23 @@ uninstall_akvps() {
   info "卸载脚本"
   rm -f /usr/local/bin/akvps
   echo "akvps 已卸载。3x-ui、Komari 和系统配置不会被删除。"
+}
+
+clear_akvps_settings() {
+  need_root
+  info "清除所有设定"
+  echo "将清除 akvps 保存的配置、密钥、角色状态和报告。"
+  echo "不会删除 3x-ui、Komari，也不会改 SSH / UFW。"
+  read -r -p "确认清除？输入 YES 继续: " confirm
+  [[ "$confirm" == "YES" ]] || {
+    echo "已取消。"
+    return 0
+  }
+  rm -f "$AKVPS_CONFIG" "$AKVPS_SECRETS" "$AKVPS_STATE"
+  rm -f "$AKVPS_LATEST_REPORT" "$AKVPS_LATEST_PANEL_REPORT" "$AKVPS_LATEST_KOMARI_REPORT" "$AKVPS_LATEST_KOMARI_SERVER_REPORT"
+  rm -rf "$AKVPS_REPORT_DIR"
+  ensure_dirs
+  echo "已清除 akvps 所有设定。"
 }
 
 update_xui() {
@@ -1355,6 +1391,7 @@ node_deploy() {
   wait_dns
   install_or_configure_xui
   generate_report
+  save_state_var "ROLE_NODE" "1"
   if is_local_master_panel; then
     echo
     echo "提示：本机是主控面板，不自动接入自己。"
@@ -1414,6 +1451,7 @@ deploy_master_panel() {
   wait_dns_for_domain "$PANEL_DOMAIN"
   install_or_configure_panel_xui
   generate_panel_report
+  save_state_var "ROLE_MASTER_PANEL" "1"
 }
 
 deploy_komari() {
@@ -1425,6 +1463,7 @@ deploy_komari() {
   prompt_komari
   deploy_komari_agent
   generate_komari_report
+  save_state_var "ROLE_KOMARI_AGENT" "1"
 }
 
 deploy_komari_server() {
@@ -1441,6 +1480,7 @@ deploy_komari_server() {
   wait_dns_for_domain "$KOMARI_SERVER_DOMAIN"
   install_komari_server
   generate_komari_server_report
+  save_state_var "ROLE_KOMARI_SERVER" "1"
 }
 
 show_latest_report() {
@@ -1524,16 +1564,18 @@ updates_menu() {
     echo "1. 更新脚本"
     echo "2. 更新 3x-ui"
     echo "3. 更新 Komari 探针"
-    echo "4. 卸载脚本"
-    echo "5. 查看版本"
+    echo "4. 清除所有设定"
+    echo "5. 卸载脚本"
+    echo "6. 查看版本"
     echo "0. 返回"
     read -r -p "请选择: " sub
     case "$sub" in
       1) update_akvps; pause_menu ;;
       2) update_xui; pause_menu ;;
       3) update_komari_agent; pause_menu ;;
-      4) uninstall_akvps; pause_menu ;;
-      5) version; pause_menu ;;
+      4) clear_akvps_settings; pause_menu ;;
+      5) uninstall_akvps; pause_menu ;;
+      6) version; pause_menu ;;
       0) return ;;
     esac
   done
