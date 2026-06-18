@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.59-mvp"
+AKVPS_VERSION="0.1.60-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -105,6 +105,10 @@ color_text() {
     *) code="0" ;;
   esac
   printf "\033[%sm%s\033[0m" "$code" "$text"
+}
+
+lower_text() {
+  printf "%s" "$1" | tr '[:upper:]' '[:lower:]'
 }
 
 pause_menu() {
@@ -280,7 +284,7 @@ save_import_pair() {
       ;;
     NODE_NAME|NODE)
       value="${value// /}"
-      value="${value,,}"
+      value="$(lower_text "$value")"
       save_config_var "NODE_NAME" "$value"
       ;;
     NODE_DOMAIN)
@@ -676,7 +680,7 @@ prompt_node() {
   info "节点信息"
   if [[ -n "$NODE_NAME" ]]; then
     NODE_NAME="${NODE_NAME// /}"
-    NODE_NAME="${NODE_NAME,,}"
+    NODE_NAME="$(lower_text "$NODE_NAME")"
     NODE_DOMAIN="${NODE_DOMAIN:-${NODE_NAME}.${AKVPS_ROOT_DOMAIN}}"
     valid_domain "$NODE_DOMAIN" || die "节点域名格式不正确：$NODE_DOMAIN" "请检查 NODE_NAME 或 NODE_DOMAIN。"
     echo "节点短名：$NODE_NAME"
@@ -688,7 +692,7 @@ prompt_node() {
   while true; do
     read -r -p "请输入节点短名，例如 jp1: " NODE_NAME
     NODE_NAME="${NODE_NAME// /}"
-    NODE_NAME="${NODE_NAME,,}"
+    NODE_NAME="$(lower_text "$NODE_NAME")"
     NODE_DOMAIN="${NODE_NAME}.${AKVPS_ROOT_DOMAIN}"
     valid_domain "$NODE_DOMAIN" && break
     echo "节点短名无法组成合法域名，请重新输入。"
@@ -699,19 +703,21 @@ prompt_node() {
 prompt_protocols() {
   info "协议准备"
   if [[ -n "$NODE_PROTOCOLS" ]]; then
-    local proto="${NODE_PROTOCOLS,,}"
+    local proto
+    proto="$(lower_text "$NODE_PROTOCOLS")"
     SELECT_VLESS=0
     SELECT_HY2=0
     SELECT_HY2_HOP=0
     [[ "$proto" == *"vless"* ]] && SELECT_VLESS=1
-    if [[ "$proto" == *"hy2"* || "$proto" == *"hysteria"* ]]; then
-      SELECT_HY2=1
-    fi
     if [[ "$proto" == *"跳跃"* || "$proto" == *"hop"* ]]; then
-      SELECT_HY2=1
       SELECT_HY2_HOP=1
     fi
-    [[ "$SELECT_VLESS" -eq 1 || "$SELECT_HY2" -eq 1 ]] || die "节点协议无法识别：$NODE_PROTOCOLS" "请填写 vless、hy2 或 hy2端口跳跃。"
+    if [[ "$proto" == *"hy2"* || "$proto" == *"hysteria"* ]]; then
+      if [[ "$SELECT_HY2_HOP" -eq 0 || "$proto" == *"/ hy2"* || "$proto" == *"hy2 /"* || "$proto" == *",hy2"* || "$proto" == *"hy2,"* || "$proto" == *" hy2 "* ]]; then
+        SELECT_HY2=1
+      fi
+    fi
+    [[ "$SELECT_VLESS" -eq 1 || "$SELECT_HY2" -eq 1 || "$SELECT_HY2_HOP" -eq 1 ]] || die "节点协议无法识别：$NODE_PROTOCOLS" "请填写 vless、hy2 或 hy2端口跳跃。"
     echo "节点协议：$(protocol_text)"
     return
   fi
@@ -1507,7 +1513,7 @@ master_inbound_status_lines() {
   require_tools_for_json
   local proto tag inbound_id kind email link_status any=0
   proto="${NODE_PROTOCOLS:-$(node_protocols_text)}"
-  proto="${proto,,}"
+  proto="$(lower_text "$proto")"
   [[ -n "$PANEL_URL" && -n "$PANEL_API_TOKEN" && -n "$NODE_NAME" ]] || {
     echo "- 主控自动接入：未配置"
     return 0
@@ -1781,7 +1787,7 @@ ensure_master_inbounds() {
   load_envs
   local node_id proto ok=1
   proto="${NODE_PROTOCOLS:-$(node_protocols_text)}"
-  proto="${proto,,}"
+  proto="$(lower_text "$proto")"
   node_id="$(master_node_id 2>/dev/null || true)"
   [[ -n "$node_id" ]] || {
     echo "未找到主控节点 ID，跳过自动建入站。"
@@ -1963,7 +1969,7 @@ prompt_panel() {
   while true; do
     read -r -p "请输入主控短名，例如 panel: " PANEL_NAME
     PANEL_NAME="${PANEL_NAME// /}"
-    PANEL_NAME="${PANEL_NAME,,}"
+    PANEL_NAME="$(lower_text "$PANEL_NAME")"
     PANEL_DOMAIN="${PANEL_NAME}.${AKVPS_ROOT_DOMAIN}"
     valid_domain "$PANEL_DOMAIN" && break
     echo "主控短名无法组成合法域名，请重新输入。"
@@ -2267,7 +2273,7 @@ prompt_komari_server() {
   while true; do
     read -r -p "请输入主站短名，例如 status: " KOMARI_SERVER_NAME
     KOMARI_SERVER_NAME="${KOMARI_SERVER_NAME// /}"
-    KOMARI_SERVER_NAME="${KOMARI_SERVER_NAME,,}"
+    KOMARI_SERVER_NAME="$(lower_text "$KOMARI_SERVER_NAME")"
     KOMARI_SERVER_DOMAIN="${KOMARI_SERVER_NAME}.${AKVPS_ROOT_DOMAIN}"
     valid_domain "$KOMARI_SERVER_DOMAIN" && break
     echo "主站短名无法组成合法域名，请重新输入。"
@@ -2469,6 +2475,20 @@ self_check_inbounds() {
     and (.streamSettings | fromjson | .hysteriaSettings.finalmask.udp[0].settings.password) == "oldpass"
     and (.streamSettings | fromjson | .hysteriaSettings.finalmask.quicParams.udpHop.ports) == "39999-59999"' >/dev/null
   echo "入站 payload 自检通过。"
+}
+
+self_check_protocols() {
+  NODE_PROTOCOLS="hy2端口跳跃"
+  prompt_protocols >/dev/null
+  [[ "$SELECT_HY2" -eq 0 && "$SELECT_HY2_HOP" -eq 1 ]]
+  NODE_PROTOCOLS="hy2"
+  prompt_protocols >/dev/null
+  [[ "$SELECT_HY2" -eq 1 && "$SELECT_HY2_HOP" -eq 0 ]]
+  NODE_PROTOCOLS="hy2 / hy2端口跳跃"
+  prompt_protocols >/dev/null
+  [[ "$SELECT_HY2" -eq 1 && "$SELECT_HY2_HOP" -eq 1 ]]
+  NODE_PROTOCOLS=""
+  echo "协议解析自检通过。"
 }
 
 initial_setup() {
@@ -2828,6 +2848,7 @@ case "${1:-menu}" in
   --version|-v|version) version ;;
   check|self-check) self_check ;;
   check-inbounds|self-check-inbounds) self_check_inbounds ;;
+  check-protocols|self-check-protocols) self_check_protocols ;;
   menu) main_menu ;;
   one-click|one-click-deploy) one_click_deploy ;;
   init|initial-setup|node|node-deploy) node_deploy ;;

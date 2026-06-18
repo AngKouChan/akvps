@@ -20,4 +20,7 @@ bash akvps --version >/dev/null
 echo "检查入站 payload..."
 bash akvps check-inbounds >/dev/null
 
+echo "检查协议解析..."
+bash akvps check-protocols >/dev/null
+
 echo "检查完成。"
