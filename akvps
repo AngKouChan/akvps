@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.62-mvp"
+AKVPS_VERSION="0.1.63-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -68,6 +68,8 @@ KOMARI_REPORT_PATH=""
 KOMARI_SERVER_REPORT_PATH=""
 KOMARI_SERVER_REUSED=0
 AKVPS_AUTO_DEPLOY=0
+AKVPS_MOCK_API=0
+AKVPS_MOCK_STATE=""
 
 die() {
   echo
@@ -1257,7 +1259,7 @@ is_local_master_panel() {
       || [[ -n "$MASTER_IPV6" && -n "$PUBLIC_IPV6" && "$MASTER_IPV6" == "$PUBLIC_IPV6" ]]; }
 }
 
-xui_api() {
+xui_api_http() {
   local method="$1" path="$2" data="${3:-}"
   local api_base response body status tried="" best_status="" best_body=""
   while IFS= read -r api_base; do
@@ -1303,6 +1305,142 @@ xui_api() {
   echo "已尝试地址：" >&2
   printf "%s" "$tried" >&2
   return 1
+}
+
+mock_state_init() {
+  AKVPS_MOCK_STATE="$(mktemp)"
+  jq -n '{nodes:[{id:7,name:"aktest"}],inbounds:[],clients:[]}' >"$AKVPS_MOCK_STATE"
+}
+
+mock_state_cleanup() {
+  [[ -n "$AKVPS_MOCK_STATE" && -f "$AKVPS_MOCK_STATE" ]] && rm -f "$AKVPS_MOCK_STATE"
+  AKVPS_MOCK_STATE=""
+}
+
+mock_client_link() {
+  local kind="$1"
+  case "$kind" in
+    vless) printf "vless://uuid@example.com:443?security=reality#aktest" ;;
+    hy2) printf "hysteria2://auth@example.com:11799?insecure=1#aktest" ;;
+    hy2hop) printf "hysteria2://auth@example.com:39999?mport=%s-%s&insecure=1#aktest" "$AKVPS_HY2_HOP_START" "$AKVPS_HY2_HOP_END" ;;
+    *) printf "" ;;
+  esac
+}
+
+mock_kind_from_email() {
+  case "$1" in
+    *-hy2hop) printf "hy2hop" ;;
+    *-hy2) printf "hy2" ;;
+    *-vless) printf "vless" ;;
+    *) printf "unknown" ;;
+  esac
+}
+
+xui_api_mock() {
+  local method="$1" path="$2" data="${3:-}" id email sub_id kind link tmp
+  [[ -n "$AKVPS_MOCK_STATE" && -f "$AKVPS_MOCK_STATE" ]] || return 1
+  case "$method $path" in
+    "GET /nodes/list")
+      jq -c '{success:true,obj:.nodes}' "$AKVPS_MOCK_STATE"
+      ;;
+    "POST /nodes/test")
+      jq -cn '{success:true,obj:{status:"online",xrayState:"running",xrayError:"",xrayVersion:"mock"}}'
+      ;;
+    "GET /server/getNewX25519Cert")
+      jq -cn '{success:true,obj:{privateKey:"mock-private",publicKey:"mock-public"}}'
+      ;;
+    "GET /inbounds/list")
+      jq -c '{success:true,obj:.inbounds}' "$AKVPS_MOCK_STATE"
+      ;;
+    "GET /inbounds/get/"*)
+      id="${path##*/}"
+      jq -c --argjson id "$id" '{success:true,obj:(.inbounds[]? | select(.id == $id))}' "$AKVPS_MOCK_STATE"
+      ;;
+    "POST /inbounds/add")
+      id="$(jq '.inbounds | length + 1' "$AKVPS_MOCK_STATE")"
+      tmp="$(mktemp)"
+      jq --argjson inbound "$data" --argjson id "$id" '.inbounds += [($inbound + {id:$id})]' "$AKVPS_MOCK_STATE" >"$tmp" && mv "$tmp" "$AKVPS_MOCK_STATE"
+      jq -cn --argjson id "$id" '{success:true,msg:"Inbound added",obj:{id:$id}}'
+      ;;
+    "POST /inbounds/update/"*)
+      id="${path##*/}"
+      tmp="$(mktemp)"
+      jq --argjson inbound "$data" --argjson id "$id" '.inbounds = (.inbounds | map(if .id == $id then ($inbound + {id:$id}) else . end))' "$AKVPS_MOCK_STATE" >"$tmp" && mv "$tmp" "$AKVPS_MOCK_STATE"
+      jq -cn '{success:true,msg:"Inbound updated",obj:{}}'
+      ;;
+    "GET /clients/get/"*)
+      email="${path##*/}"
+      jq -c --arg email "$email" '{success:true,obj:(.clients[]? | select(.client.email == $email))}' "$AKVPS_MOCK_STATE"
+      ;;
+    "POST /clients/add")
+      email="$(printf "%s" "$data" | jq -r '.client.email')"
+      kind="$(mock_kind_from_email "$email")"
+      sub_id="${email}-sub"
+      tmp="$(mktemp)"
+      jq --argjson payload "$data" --arg email "$email" --arg subId "$sub_id" --arg kind "$kind" '
+        .clients += [{
+          client:(
+            $payload.client
+            + {subId:$subId, enable:true}
+            + (if $kind == "vless" then {uuid:"mock-uuid",id:"mock-uuid",flow:"xtls-rprx-vision"}
+               elif ($kind == "hy2" or $kind == "hy2hop") then {auth:"mock-auth",flow:""}
+               else {} end)
+          ),
+          inboundIds:$payload.inboundIds,
+          externalLinks:[]
+        }]' "$AKVPS_MOCK_STATE" >"$tmp" && mv "$tmp" "$AKVPS_MOCK_STATE"
+      jq -cn '{success:true,msg:"Client added",obj:{}}'
+      ;;
+    "POST /clients/update/"*)
+      email="${path##*/}"
+      kind="$(mock_kind_from_email "$email")"
+      tmp="$(mktemp)"
+      jq --argjson client "$data" --arg email "$email" --arg kind "$kind" '
+        .clients = (.clients | map(if .client.email == $email then
+          .client = (
+            .client
+            + $client
+            + {enable:true}
+            + (if $kind == "vless" then {uuid:(.client.uuid // .client.id // "mock-uuid"), id:(.client.id // .client.uuid // "mock-uuid"), flow:"xtls-rprx-vision"}
+               elif ($kind == "hy2" or $kind == "hy2hop") then {auth:(.client.auth // "mock-auth"), flow:""}
+               else {} end)
+          )
+        else . end))' "$AKVPS_MOCK_STATE" >"$tmp" && mv "$tmp" "$AKVPS_MOCK_STATE"
+      jq -cn '{success:true,msg:"Client updated",obj:{}}'
+      ;;
+    "POST /clients/"*"/attach")
+      email="${path#/clients/}"
+      email="${email%/attach}"
+      tmp="$(mktemp)"
+      jq --arg email "$email" --argjson payload "$data" '.clients = (.clients | map(if .client.email == $email then .inboundIds = $payload.inboundIds else . end))' "$AKVPS_MOCK_STATE" >"$tmp" && mv "$tmp" "$AKVPS_MOCK_STATE"
+      jq -cn '{success:true,msg:"Client attached",obj:{}}'
+      ;;
+    "GET /clients/links/"*)
+      email="${path##*/}"
+      kind="$(mock_kind_from_email "$email")"
+      link="$(mock_client_link "$kind")"
+      jq -cn --arg link "$link" '{success:true,obj:[$link]}'
+      ;;
+    "GET /clients/subLinks/"*)
+      sub_id="${path##*/}"
+      email="${sub_id%-sub}"
+      kind="$(mock_kind_from_email "$email")"
+      link="$(mock_client_link "$kind")"
+      jq -cn --arg link "$link" '{success:true,obj:[$link]}'
+      ;;
+    *)
+      jq -cn --arg path "$path" '{success:false,msg:("mock endpoint not implemented: " + $path)}'
+      return 1
+      ;;
+  esac
+}
+
+xui_api() {
+  if [[ "${AKVPS_MOCK_API:-0}" == "1" ]]; then
+    xui_api_mock "$@"
+  else
+    xui_api_http "$@"
+  fi
 }
 
 build_node_payload() {
@@ -2572,6 +2710,48 @@ self_check_protocols() {
   echo "协议解析自检通过。"
 }
 
+self_check_master_flow() {
+  AKVPS_MOCK_API=1
+  mock_state_init
+  trap 'mock_state_cleanup' RETURN
+  PANEL_URL="https://panel.example.com/abc"
+  PANEL_API_TOKEN="mock-panel-token"
+  NODE_NAME="aktest"
+  NODE_DOMAIN="aktest.example.com"
+  NODE_XUI_URL="https://aktest.example.com:11123/base/"
+  NODE_XUI_API_TOKEN="mock-node-token"
+  NODE_PROTOCOLS="vless / hy2端口跳跃"
+  ensure_master_inbounds >/dev/null
+  jq -e '
+    (.inbounds | length) == 2
+    and any(.inbounds[]; .tag == "akvps-aktest-vless" and .protocol == "vless" and (.streamSettings | fromjson | .security) == "reality")
+    and any(.inbounds[]; .tag == "akvps-aktest-hy2hop" and .protocol == "hysteria"
+      and (.streamSettings | fromjson | .finalmask.quicParams.udpHop.ports) == "39999-59999"
+      and (.streamSettings | fromjson | .hysteriaSettings.finalmask.quicParams.udpHop.ports) == "39999-59999")
+    and ([.inbounds[].tag] | index("akvps-aktest-hy2") | not)
+    and (.clients | length) == 2
+    and any(.clients[]; .client.email == "aktest-vless" and .client.subId == "aktest-vless-sub" and .client.uuid != "" and .client.flow == "xtls-rprx-vision" and (.inboundIds | length) == 1)
+    and any(.clients[]; .client.email == "aktest-hy2hop" and .client.subId == "aktest-hy2hop-sub" and .client.auth != "" and (.inboundIds | length) == 1)
+  ' "$AKVPS_MOCK_STATE" >/dev/null
+  verify_client_links "aktest-vless" vless >/dev/null
+  verify_client_links "aktest-hy2hop" hy2hop >/dev/null
+  client_links_are_complete "$(xui_api GET "/clients/links/aktest-hy2hop")" hy2hop "hysteria2://"
+
+  NODE_PROTOCOLS="hy2 / hy2端口跳跃"
+  mock_state_cleanup
+  mock_state_init
+  ensure_master_inbounds >/dev/null
+  jq -e '
+    (.inbounds | length) == 2
+    and any(.inbounds[]; .tag == "akvps-aktest-hy2")
+    and any(.inbounds[]; .tag == "akvps-aktest-hy2hop")
+    and (.clients | length) == 2
+    and any(.clients[]; .client.email == "aktest-hy2" and .client.auth != "")
+    and any(.clients[]; .client.email == "aktest-hy2hop" and .client.auth != "")
+  ' "$AKVPS_MOCK_STATE" >/dev/null
+  echo "主控一键接入链路自检通过。"
+}
+
 initial_setup() {
   node_deploy
 }
@@ -2930,6 +3110,7 @@ case "${1:-menu}" in
   check|self-check) self_check ;;
   check-inbounds|self-check-inbounds) self_check_inbounds ;;
   check-protocols|self-check-protocols) self_check_protocols ;;
+  check-master-flow|self-check-master-flow) self_check_master_flow ;;
   menu) main_menu ;;
   one-click|one-click-deploy) one_click_deploy ;;
   init|initial-setup|node|node-deploy) node_deploy ;;

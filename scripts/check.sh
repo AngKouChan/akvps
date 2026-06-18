@@ -23,4 +23,7 @@ bash akvps check-inbounds >/dev/null
 echo "检查协议解析..."
 bash akvps check-protocols >/dev/null
 
+echo "检查主控一键接入链路..."
+bash akvps check-master-flow >/dev/null
+
 echo "检查完成。"
