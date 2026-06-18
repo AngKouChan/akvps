@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.47-mvp"
+AKVPS_VERSION="0.1.49-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1230,37 +1230,166 @@ master_inbound_id_by_tag() {
   xui_api GET "/inbounds/list" | jq -r --arg tag "$tag" '.obj[]? | select(.tag == $tag) | .id' | head -n1
 }
 
+master_inbound_by_id() {
+  local inbound_id="$1"
+  xui_api GET "/inbounds/get/${inbound_id}" | jq -c '.obj // empty'
+}
+
+decode_json_field() {
+  jq -c 'if type == "string" then (fromjson? // {}) elif type == "object" then . else {} end'
+}
+
+generate_reality_keys_from_master() {
+  local response private public
+  response="$(xui_api GET "/server/getNewX25519Cert" 2>/dev/null || true)"
+  private="$(printf "%s" "$response" | jq -r '.obj.privateKey // .obj.PrivateKey // empty' 2>/dev/null || true)"
+  public="$(printf "%s" "$response" | jq -r '.obj.publicKey // .obj.PublicKey // empty' 2>/dev/null || true)"
+  [[ -n "$private" && -n "$public" ]] || return 1
+  printf "%s|%s" "$private" "$public"
+}
+
+existing_inbound_settings() {
+  local inbound_json="$1"
+  [[ -n "$inbound_json" ]] || {
+    printf "{}"
+    return
+  }
+  printf "%s" "$inbound_json" | jq -c '.settings' | decode_json_field
+}
+
+existing_inbound_stream() {
+  local inbound_json="$1"
+  [[ -n "$inbound_json" ]] || {
+    printf "{}"
+    return
+  }
+  printf "%s" "$inbound_json" | jq -c '.streamSettings' | decode_json_field
+}
+
+existing_clients_or_default() {
+  local settings="$1" default_client="$2"
+  printf "%s" "$settings" | jq -c --argjson defaultClient "$default_client" '
+    if (.clients | type) == "array" and (.clients | length) > 0 then .clients else [$defaultClient] end'
+}
+
+client_exists() {
+  local email="$1"
+  xui_api GET "/clients/get/${email}" 2>/dev/null | jq -e '.success == true and .obj != null' >/dev/null 2>&1
+}
+
+build_client_payload() {
+  local email="$1" inbound_id="$2" flow="${3:-}"
+  jq -cn \
+    --arg email "$email" \
+    --arg flow "$flow" \
+    --argjson inboundId "$inbound_id" \
+    '{
+      client: ({
+        email:$email,
+        totalGB:0,
+        expiryTime:0,
+        tgId:0,
+        limitIp:0,
+        enable:true,
+        comment:"",
+        reset:0
+      } + (if $flow != "" then {flow:$flow} else {} end)),
+      inboundIds:[$inboundId]
+    }'
+}
+
+ensure_master_client() {
+  local inbound_id="$1" kind="$2" email flow payload response msg
+  case "$kind" in
+    vless)
+      email="${NODE_NAME}-vless"
+      flow="xtls-rprx-vision"
+      ;;
+    hy2)
+      email="${NODE_NAME}-hy2"
+      flow=""
+      ;;
+    hy2hop)
+      email="${NODE_NAME}-hy2hop"
+      flow=""
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+  if client_exists "$email"; then
+    echo "客户端已存在：$email"
+    return 0
+  fi
+  payload="$(build_client_payload "$email" "$inbound_id" "$flow")"
+  response="$(xui_api POST "/clients/add" "$payload")" || return 1
+  if printf "%s" "$response" | json_success; then
+    echo "已创建客户端：$email"
+    return 0
+  fi
+  msg="$(printf "%s" "$response" | jq -r '.msg // empty')"
+  echo "客户端创建失败：${msg:-unknown}"
+  return 1
+}
+
 build_minimal_inbound_payload() {
-  local node_id="$1" kind="$2" tag="$3" remark="$4" port="$5" inbound_id="${6:-0}"
-  local protocol settings stream sniffing client_id client_email sub_id short_id key_pair private_key public_key hy_auth
-  sniffing='{"enabled":true,"destOverride":["http","tls","quic","fakedns"],"metadataOnly":false,"routeOnly":false}'
+  local node_id="$1" kind="$2" tag="$3" remark="$4" port="$5" inbound_id="${6:-0}" existing_json="${7:-}"
+  local protocol settings stream sniffing short_id key_pair private_key public_key
+  local old_settings old_stream old_private old_public old_short_ids old_target old_server_names
+  old_settings="$(existing_inbound_settings "$existing_json")"
+  old_stream="$(existing_inbound_stream "$existing_json")"
+  sniffing='{"enabled":true,"destOverride":["http","tls","quic","fakedns"],"metadataOnly":false,"routeOnly":false,"ipsExcluded":[],"domainsExcluded":[]}'
   case "$kind" in
     vless)
       protocol="vless"
-      client_id="$(random_uuid)"
-      client_email="${NODE_NAME}-vless"
-      sub_id="$(random_string 16)"
       short_id="$(random_string 8)"
-      key_pair="$(generate_reality_keys)"
+      key_pair="$(generate_reality_keys_from_master 2>/dev/null || generate_reality_keys)"
       private_key="${key_pair%%|*}"
       public_key="${key_pair#*|}"
-      settings="$(jq -cn \
-        --arg id "$client_id" \
-        --arg email "$client_email" \
-        --arg subId "$sub_id" \
-        '{clients:[{id:$id,email:$email,enable:true,flow:"xtls-rprx-vision",limitIp:0,totalGB:0,expiryTime:0,subId:$subId,tgId:"",reset:0}],decryption:"none",fallbacks:[],testseed:[900,500,900,256]}')"
+      old_private="$(printf "%s" "$old_stream" | jq -r '.realitySettings.privateKey // empty')"
+      old_public="$(printf "%s" "$old_stream" | jq -r '.realitySettings.settings.publicKey // empty')"
+      old_short_ids="$(printf "%s" "$old_stream" | jq -c '.realitySettings.shortIds // []')"
+      old_target="$(printf "%s" "$old_stream" | jq -r '.realitySettings.target // .realitySettings.dest // empty')"
+      old_server_names="$(printf "%s" "$old_stream" | jq -c '.realitySettings.serverNames // []')"
+      [[ -n "$old_private" ]] && private_key="$old_private"
+      [[ -n "$old_public" ]] && public_key="$old_public"
+      [[ "$(printf "%s" "$old_short_ids" | jq 'length')" -gt 0 ]] && short_id="$(printf "%s" "$old_short_ids" | jq -r '.[0]')"
+      settings='{"clients":[],"decryption":"none","encryption":"none","fallbacks":[],"testseed":[900,500,900,256]}'
       stream="$(jq -cn \
         --arg privateKey "$private_key" \
         --arg publicKey "$public_key" \
         --arg shortId "$short_id" \
-        '{network:"tcp",security:"reality",tcpSettings:{acceptProxyProtocol:false,header:{type:"none"}},realitySettings:{show:false,xver:0,dest:"www.microsoft.com:443",serverNames:["www.microsoft.com"],privateKey:$privateKey,minClient:"",maxClient:"",maxTimediff:0,shortIds:[$shortId],settings:{publicKey:$publicKey,fingerprint:"chrome",serverName:"",spiderX:"/"}}}')"
+        --arg target "${old_target:-www.microsoft.com:443}" \
+        --argjson serverNames "${old_server_names:-[]}" \
+        '{
+          network:"tcp",
+          security:"reality",
+          tcpSettings:{acceptProxyProtocol:false,header:{type:"none"}},
+          realitySettings:{
+            show:false,
+            xver:0,
+            target:$target,
+            serverNames:(if ($serverNames | length) > 0 then $serverNames else ["www.microsoft.com"] end),
+            privateKey:$privateKey,
+            minClientVer:"",
+            maxClientVer:"",
+            maxTimediff:0,
+            shortIds:[$shortId],
+            mldsa65Seed:"",
+            settings:{publicKey:$publicKey,fingerprint:"chrome",serverName:"",spiderX:"/",mldsa65Verify:""}
+          }
+        }')"
       ;;
     hy2|hy2hop)
       protocol="hysteria"
-      client_email="${NODE_NAME}-${kind}"
-      hy_auth="$(random_string 16)"
-      settings="$(jq -cn --arg email "$client_email" --arg auth "$hy_auth" '{clients:[{email:$email,enable:true,auth:$auth,limitIp:0,totalGB:0,expiryTime:0,subId:"",tgId:"",reset:0}],ignoreClientBandwidth:false}')"
-      stream='{"network":"udp","security":"tls","tlsSettings":{"serverName":"","minVersion":"1.2","maxVersion":"1.3","cipherSuites":"","certificates":[],"alpn":["h3"],"settings":{}}}'
+      settings='{"version":2,"clients":[]}'
+      if [[ "$kind" == "hy2hop" ]]; then
+        stream="$(jq -cn \
+          --arg ports "${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}" \
+          '{network:"hysteria",security:"tls",hysteriaSettings:{version:2,auth:"",udpIdleTimeout:60,masquerade:{type:"",dir:"",url:"",rewriteHost:false,insecure:false,content:"",headers:{},statusCode:0}},tlsSettings:{serverName:"",alpn:["h3"],fingerprint:"",echConfigList:"",verifyPeerCertByName:"",pinnedPeerCertSha256:""},finalmask:{quicParams:{udpHop:{ports:$ports,interval:"5-10"}}}}')"
+      else
+        stream='{ "network":"hysteria","security":"tls","hysteriaSettings":{"version":2,"auth":"","udpIdleTimeout":60,"masquerade":{"type":"","dir":"","url":"","rewriteHost":false,"insecure":false,"content":"","headers":{},"statusCode":0}},"tlsSettings":{"serverName":"","alpn":["h3"],"fingerprint":"","echConfigList":"","verifyPeerCertByName":"","pinnedPeerCertSha256":""} }'
+      fi
       ;;
     *)
       return 1
@@ -1299,20 +1428,27 @@ build_minimal_inbound_payload() {
 }
 
 ensure_master_inbound() {
-  local node_id="$1" kind="$2" tag="$3" remark="$4" port="$5" payload response msg inbound_id path action
+  local node_id="$1" kind="$2" tag="$3" remark="$4" port="$5" payload response msg inbound_id path action existing_json
   inbound_id="$(master_inbound_id_by_tag "$tag" 2>/dev/null || true)"
   if [[ -n "$inbound_id" ]]; then
+    existing_json="$(master_inbound_by_id "$inbound_id" 2>/dev/null || true)"
     path="/inbounds/update/${inbound_id}"
     action="已更新"
   else
     inbound_id=0
+    existing_json=""
     path="/inbounds/add"
     action="已创建"
   fi
-  payload="$(build_minimal_inbound_payload "$node_id" "$kind" "$tag" "$remark" "$port" "$inbound_id")" || return 1
+  payload="$(build_minimal_inbound_payload "$node_id" "$kind" "$tag" "$remark" "$port" "$inbound_id" "$existing_json")" || return 1
   response="$(xui_api POST "$path" "$payload")" || return 1
   if printf "%s" "$response" | json_success; then
     echo "${action}入站：$remark"
+    if [[ "$inbound_id" == "0" ]]; then
+      inbound_id="$(printf "%s" "$response" | jq -r '.obj.id // empty')"
+      [[ -n "$inbound_id" ]] || inbound_id="$(master_inbound_id_by_tag "$tag" 2>/dev/null || true)"
+    fi
+    [[ -n "$inbound_id" ]] && ensure_master_client "$inbound_id" "$kind" || true
     return 0
   fi
   msg="$(printf "%s" "$response" | jq -r '.msg // empty')"
@@ -1905,6 +2041,37 @@ self_check() {
   fi
 }
 
+self_check_inbounds() {
+  NODE_NAME="${NODE_NAME:-aktest}"
+  generate_reality_keys_from_master() {
+    printf "master-private-key|master-public-key"
+  }
+  local vless hy2 hy2hop
+  vless="$(build_minimal_inbound_payload 1 vless akvps-aktest-vless "aktest vless" "$AKVPS_VLESS_PORT" 0 "")"
+  hy2="$(build_minimal_inbound_payload 1 hy2 akvps-aktest-hy2 "aktest hy2" "$AKVPS_HY2_PORT" 0 "")"
+  hy2hop="$(build_minimal_inbound_payload 1 hy2hop akvps-aktest-hy2hop "aktest hy2端口跳跃" "$AKVPS_HY2_HOP_START" 0 "")"
+  printf "%s" "$vless" | jq -e '
+    .protocol == "vless"
+    and (.settings | fromjson | .clients | length) == 0
+    and (.streamSettings | fromjson | .realitySettings.privateKey) == "master-private-key"
+    and (.streamSettings | fromjson | .realitySettings.settings.publicKey) == "master-public-key"
+    and (.streamSettings | fromjson | .realitySettings.target) == "www.microsoft.com:443"
+    and (.streamSettings | fromjson | .realitySettings.shortIds | length) == 1' >/dev/null
+  printf "%s" "$hy2" | jq -e '
+    .protocol == "hysteria"
+    and (.settings | fromjson | .version) == 2
+    and (.settings | fromjson | .clients | length) == 0
+    and (.streamSettings | fromjson | .network) == "hysteria"
+    and (.streamSettings | fromjson | .security) == "tls"' >/dev/null
+  printf "%s" "$hy2hop" | jq -e '
+    (.streamSettings | fromjson | .finalmask.quicParams.udpHop.ports) == "39999-59999"' >/dev/null
+  build_client_payload "aktest-vless" 1 "xtls-rprx-vision" | jq -e '
+    .client.email == "aktest-vless"
+    and .client.flow == "xtls-rprx-vision"
+    and .inboundIds == [1]' >/dev/null
+  echo "入站 payload 自检通过。"
+}
+
 initial_setup() {
   node_deploy
 }
@@ -2268,6 +2435,7 @@ main_menu() {
 case "${1:-menu}" in
   --version|-v|version) version ;;
   check|self-check) self_check ;;
+  check-inbounds|self-check-inbounds) self_check_inbounds ;;
   menu) main_menu ;;
   one-click|one-click-deploy) one_click_deploy ;;
   init|initial-setup|node|node-deploy) node_deploy ;;
