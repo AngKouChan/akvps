@@ -12,7 +12,7 @@ need_root() {
 }
 
 install_akvps() {
-  local latest_sha source_url tmp_file
+  local latest_sha source_url tmp_file downloaded_version cachebust
   if [[ "${AKVPS_USE_LOCAL:-0}" == "1" && -f "./akvps" ]]; then
     install -m 0755 "./akvps" "$AKVPS_BIN"
   else
@@ -25,9 +25,17 @@ install_akvps() {
     else
       source_url="$AKVPS_REPO_RAW/akvps"
     fi
-    curl -fsSL "$source_url" -o "$tmp_file"
+    cachebust="$(date +%s)"
+    curl -fsSL --connect-timeout 10 --max-time 60 -H "Cache-Control: no-cache" "${source_url}?cachebust=${cachebust}" -o "$tmp_file"
+    downloaded_version="$(sed -n 's/^AKVPS_VERSION="\([^"]*\)".*/\1/p' "$tmp_file" | head -n1)"
+    if [[ -z "$downloaded_version" ]] || ! grep -q '^main_menu()' "$tmp_file"; then
+      rm -f "$tmp_file"
+      echo "下载到的文件不是有效 akvps 脚本，请稍后重试。"
+      exit 1
+    fi
     install -m 0755 "$tmp_file" "$AKVPS_BIN"
     rm -f "$tmp_file"
+    echo "已下载 akvps $downloaded_version"
   fi
 }
 

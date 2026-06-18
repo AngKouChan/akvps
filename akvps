@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.69-mvp"
+AKVPS_VERSION="0.1.70-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -85,6 +85,21 @@ info() {
 
 version() {
   echo "akvps $AKVPS_VERSION"
+}
+
+download_latest_akvps() {
+  local dest="$1" latest_sha source_url downloaded_version cachebust
+  latest_sha="$(curl -fsSL --connect-timeout 10 --max-time 30 https://api.github.com/repos/AngKouChan/akvps/commits/main 2>/dev/null \
+    | sed -n 's/^[[:space:]]*"sha": *"\([0-9a-f]\{40\}\)".*/\1/p' \
+    | head -n1 || true)"
+  source_url="https://raw.githubusercontent.com/AngKouChan/akvps/${latest_sha:-main}/akvps"
+  cachebust="$(date +%s)"
+  curl -fsSL --connect-timeout 10 --max-time 60 -H "Cache-Control: no-cache" "${source_url}?cachebust=${cachebust}" -o "$dest" \
+    || die "下载新版 akvps 失败。" "请检查 VPS 能否访问 GitHub raw.githubusercontent.com。"
+  downloaded_version="$(sed -n 's/^AKVPS_VERSION="\([^"]*\)".*/\1/p' "$dest" | head -n1)"
+  [[ -n "$downloaded_version" ]] || die "下载到的文件不是有效 akvps 脚本。" "请稍后重试，或用固定提交安装命令。"
+  grep -q '^main_menu()' "$dest" || die "下载到的 akvps 脚本不完整。" "请稍后重试，或用固定提交安装命令。"
+  printf "%s\n" "$downloaded_version"
 }
 
 use_color() {
@@ -827,16 +842,13 @@ restore_ssh_password() {
 update_akvps() {
   need_root
   info "更新脚本"
-  local tmp_file latest_sha source_url
+  local tmp_file downloaded_version
   tmp_file="$(mktemp)"
-  latest_sha="$(curl -fsSL --connect-timeout 10 --max-time 30 https://api.github.com/repos/AngKouChan/akvps/commits/main 2>/dev/null \
-    | sed -n 's/^[[:space:]]*"sha": *"\([0-9a-f]\{40\}\)".*/\1/p' \
-    | head -n1 || true)"
-  source_url="https://raw.githubusercontent.com/AngKouChan/akvps/${latest_sha:-main}/akvps"
-  curl -fsSL "$source_url" -o "$tmp_file"
+  downloaded_version="$(download_latest_akvps "$tmp_file")"
   install -m 0755 "$tmp_file" /usr/local/bin/akvps
   rm -f "$tmp_file"
-  echo "akvps 已更新，正在重新打开新版菜单..."
+  echo "akvps 已更新：${AKVPS_VERSION} -> ${downloaded_version}"
+  echo "正在重新打开新版菜单..."
   exec /usr/local/bin/akvps
 }
 
