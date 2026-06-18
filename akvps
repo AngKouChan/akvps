@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.64-mvp"
+AKVPS_VERSION="0.1.65-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1127,6 +1127,10 @@ random_uuid() {
   fi
 }
 
+client_sub_id_for_email() {
+  printf "%s-sub" "$1"
+}
+
 xray_bin() {
   local candidate found
   for candidate in \
@@ -1771,14 +1775,17 @@ master_inbound_status_lines() {
 }
 
 build_client_payload() {
-  local email="$1" inbound_id="$2" flow="${3:-}"
+  local email="$1" inbound_id="$2" flow="${3:-}" sub_id
+  sub_id="$(client_sub_id_for_email "$email")"
   jq -cn \
     --arg email "$email" \
     --arg flow "$flow" \
+    --arg subId "$sub_id" \
     --argjson inboundId "$inbound_id" \
     '{
       client: ({
         email:$email,
+        subId:$subId,
         totalGB:0,
         expiryTime:0,
         tgId:0,
@@ -2677,6 +2684,7 @@ self_check_inbounds() {
     and (.streamSettings | fromjson | .hysteriaSettings.finalmask.quicParams.udpHop.ports) == "39999-59999"' >/dev/null
   build_client_payload "aktest-vless" 1 "xtls-rprx-vision" | jq -e '
     .client.email == "aktest-vless"
+    and .client.subId == "aktest-vless-sub"
     and .client.flow == "xtls-rprx-vision"
     and .inboundIds == [1]' >/dev/null
   [[ "$(expected_client_link_scheme vless)" == "vless://" ]]
