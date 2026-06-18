@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.67-mvp"
+AKVPS_VERSION="0.1.68-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1222,12 +1222,24 @@ json_success() {
 }
 
 api_base_from_panel_url() {
-  local url="${PANEL_URL%/}"
+  local url
+  url="$(normalize_panel_url "$PANEL_URL")"
   printf "%s/panel/api" "$url"
+}
+
+normalize_panel_url() {
+  local url="$1"
+  url="${url%/}"
+  while [[ "$url" == */panel ]]; do
+    url="${url%/panel}"
+    url="${url%/}"
+  done
+  printf "%s" "$url"
 }
 
 url_origin_from_url() {
   local url="$1" origin
+  url="$(normalize_panel_url "$url")"
   origin="${url#*://}"
   origin="${origin%%/*}"
   printf "%s://%s" "${url%%://*}" "$origin"
@@ -1243,6 +1255,7 @@ api_base_candidates() {
 
 node_base_path_from_url() {
   local url="$1" path
+  url="$(normalize_panel_url "$url")"
   path="/$(printf "%s" "$url" | sed -E 's|^[a-zA-Z]+://[^/]+/?||')"
   [[ "$path" == "/" ]] || path="${path%/}/"
   printf "%s" "$path"
@@ -1371,9 +1384,9 @@ mock_client_link() {
   local kind="$1" host
   host="$(mock_link_host "$kind")"
   case "$kind" in
-    vless) printf "vless://uuid@%s:443?security=reality#aktest" "$host" ;;
-    hy2) printf "hysteria2://auth@%s:11799?insecure=1#aktest" "$host" ;;
-    hy2hop) printf "hysteria2://auth@%s:39999?mport=%s-%s&insecure=1#aktest" "$host" "$AKVPS_HY2_HOP_START" "$AKVPS_HY2_HOP_END" ;;
+    vless) printf "vless://uuid@%s:443?type=tcp&encryption=none&security=reality&pbk=mock-public&fp=chrome&sni=www.microsoft.com&sid=abcd1234&spx=%%2F&flow=xtls-rprx-vision#aktest" "$host" ;;
+    hy2) printf "hysteria2://auth@%s:11799?security=tls&alpn=h3&sni=%s#aktest" "$host" "$host" ;;
+    hy2hop) printf "hysteria2://auth@%s:39999?security=tls&alpn=h3&sni=%s&mport=%s-%s#aktest" "$host" "$host" "$AKVPS_HY2_HOP_START" "$AKVPS_HY2_HOP_END" ;;
     *) printf "" ;;
   esac
 }
@@ -1423,6 +1436,9 @@ xui_api_mock() {
     "GET /server/getNewX25519Cert")
       jq -cn '{success:true,obj:{privateKey:"mock-private",publicKey:"mock-public"}}'
       ;;
+    "GET /nodes/webCert/"*)
+      jq -cn '{success:true,obj:{webCertFile:"/root/cert/aktest.example.com/fullchain.pem",webKeyFile:"/root/cert/aktest.example.com/privkey.pem"}}'
+      ;;
     "GET /inbounds/list")
       jq -c '{success:true,obj:.inbounds}' "$AKVPS_MOCK_STATE"
       ;;
@@ -1467,6 +1483,7 @@ xui_api_mock() {
       ;;
     "POST /clients/update/"*)
       email="${path##*/}"
+      email="${email%%\?*}"
       kind="$(mock_kind_from_email "$email")"
       sub_id="${email}-sub"
       tmp="$(mktemp)"
@@ -1561,6 +1578,44 @@ master_inbound_by_id() {
   xui_api GET "/inbounds/get/${inbound_id}" | jq -c '.obj // empty'
 }
 
+master_inbound_saved_complete() {
+  local inbound_id="$1" kind="$2" node_id="$3" inbound_json
+  inbound_json="$(master_inbound_by_id "$inbound_id" 2>/dev/null || true)"
+  [[ -n "$inbound_json" ]] || return 1
+  printf "%s" "$inbound_json" | jq -e --arg kind "$kind" --argjson nodeId "$node_id" --arg ports "${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}" '
+    .nodeId == $nodeId
+    and .shareAddrStrategy == "node"
+    and (.shareAddr // "") == ""
+    and (
+      if $kind == "vless" then
+        .protocol == "vless"
+        and ((.settings | fromjson).decryption // "") == "none"
+        and ((.streamSettings | fromjson).network // "") == "tcp"
+        and ((.streamSettings | fromjson).security // "") == "reality"
+        and (((.streamSettings | fromjson).realitySettings.target // "") | test(":[0-9]+$"))
+        and (((.streamSettings | fromjson).realitySettings.dest // "") | test(":[0-9]+$"))
+        and (((.streamSettings | fromjson).realitySettings.privateKey // "") != "")
+        and (((.streamSettings | fromjson).realitySettings.settings.publicKey // "") != "")
+        and (((.streamSettings | fromjson).realitySettings.shortIds // []) | length > 0)
+        and (((.streamSettings | fromjson).realitySettings.serverNames // []) | length > 0)
+      elif ($kind == "hy2" or $kind == "hy2hop") then
+        .protocol == "hysteria"
+        and ((.settings | fromjson).version // 0) == 2
+        and ((.streamSettings | fromjson).network // "") == "hysteria"
+        and ((.streamSettings | fromjson).security // "") == "tls"
+        and (((.streamSettings | fromjson).tlsSettings.alpn // []) | index("h3") != null)
+        and (((.streamSettings | fromjson).tlsSettings.certificates[0].certificateFile // "") != "")
+        and (((.streamSettings | fromjson).tlsSettings.certificates[0].keyFile // "") != "")
+        and (if $kind == "hy2hop" then
+          ((.streamSettings | fromjson).finalmask.quicParams.udpHop.ports // "") == $ports
+          and ((.streamSettings | fromjson).hysteriaSettings.finalmask.quicParams.udpHop.ports // "") == $ports
+        else true end)
+      else
+        true
+      end
+    )' >/dev/null 2>&1
+}
+
 decode_json_field() {
   jq -c 'if type == "string" then (fromjson? // {}) elif type == "object" then . else {} end'
 }
@@ -1572,6 +1627,24 @@ generate_reality_keys_from_master() {
   public="$(printf "%s" "$response" | jq -r '.obj.publicKey // .obj.PublicKey // empty' 2>/dev/null || true)"
   [[ -n "$private" && -n "$public" ]] || return 1
   printf "%s|%s" "$private" "$public"
+}
+
+node_web_cert_files() {
+  local node_id="$1" response cert key
+  if [[ -n "$node_id" && "$node_id" != "0" ]]; then
+    response="$(xui_api GET "/nodes/webCert/${node_id}" 2>/dev/null || true)"
+    cert="$(printf "%s" "$response" | jq -r '.obj.webCertFile // empty' 2>/dev/null || true)"
+    key="$(printf "%s" "$response" | jq -r '.obj.webKeyFile // empty' 2>/dev/null || true)"
+    if [[ -n "$cert" && -n "$key" ]]; then
+      printf "%s|%s" "$cert" "$key"
+      return 0
+    fi
+  fi
+  if [[ -n "${NODE_DOMAIN:-}" ]]; then
+    printf "/root/cert/%s/fullchain.pem|/root/cert/%s/privkey.pem" "$NODE_DOMAIN" "$NODE_DOMAIN"
+    return 0
+  fi
+  printf "|"
 }
 
 existing_inbound_settings() {
@@ -1663,7 +1736,7 @@ client_update_payload() {
 }
 
 repair_master_client() {
-  local email="$1" kind="$2" flow="$3" client_json payload response msg encoded_email
+  local email="$1" kind="$2" flow="$3" inbound_id="${4:-}" client_json payload response msg encoded_email update_path
   encoded_email="$(url_encode "$email")"
   client_json="$(client_get_json "$email")" || return 1
   [[ -n "$client_json" ]] || return 1
@@ -1671,7 +1744,9 @@ repair_master_client() {
     return 0
   fi
   payload="$(client_update_payload "$client_json" "$kind" "$flow")"
-  response="$(xui_api POST "/clients/update/${encoded_email}" "$payload")" || return 1
+  update_path="/clients/update/${encoded_email}"
+  [[ -n "$inbound_id" ]] && update_path="${update_path}?inboundIds=${inbound_id}"
+  response="$(xui_api POST "$update_path" "$payload")" || return 1
   if printf "%s" "$response" | json_success; then
     echo "已修正客户端资料：$email"
     client_json="$(client_get_json "$email")" || return 1
@@ -1700,6 +1775,33 @@ client_links_are_complete() {
     .success == true
     and (.obj | type) == "array"
     and any(.obj[]; type == "string" and startswith($scheme))' >/dev/null 2>&1 || return 1
+  if [[ "$kind" == "vless" ]]; then
+    printf "%s" "$response" | jq -e --arg scheme "$scheme" '
+      .success == true
+      and (.obj | type) == "array"
+      and any(.obj[];
+        type == "string"
+        and startswith($scheme)
+        and contains("type=tcp")
+        and contains("security=reality")
+        and contains("encryption=none")
+        and contains("pbk=")
+        and contains("sid=")
+        and contains("sni=")
+        and contains("fp=")
+        and contains("flow=xtls-rprx-vision")
+      )' >/dev/null 2>&1 || return 1
+  fi
+  if [[ "$kind" == "hy2" || "$kind" == "hy2hop" ]]; then
+    printf "%s" "$response" | jq -e --arg scheme "$scheme" '
+      .success == true
+      and (.obj | type) == "array"
+      and any(.obj[];
+        type == "string"
+        and startswith($scheme)
+        and contains("security=tls")
+      )' >/dev/null 2>&1 || return 1
+  fi
   if [[ "$kind" == "hy2hop" ]]; then
     hop_ports="${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}"
     printf "%s" "$response" | jq -e --arg scheme "$scheme" --arg ports "$hop_ports" '
@@ -1856,7 +1958,7 @@ ensure_master_client() {
     else
       attach_client_to_inbound "$email" "$inbound_id" || return 1
     fi
-    repair_master_client "$email" "$kind" "$flow" || return 1
+    repair_master_client "$email" "$kind" "$flow" "$inbound_id" || return 1
     verify_client_links "$email" "$kind" || return 1
     return 0
   fi
@@ -1864,7 +1966,7 @@ ensure_master_client() {
   response="$(xui_api POST "/clients/add" "$payload")" || return 1
   if printf "%s" "$response" | json_success; then
     echo "已创建客户端：$email"
-    repair_master_client "$email" "$kind" "$flow" || return 1
+    repair_master_client "$email" "$kind" "$flow" "$inbound_id" || return 1
     verify_client_links "$email" "$kind" || return 1
     return 0
   fi
@@ -1876,7 +1978,7 @@ ensure_master_client() {
 build_minimal_inbound_payload() {
   local node_id="$1" kind="$2" tag="$3" remark="$4" port="$5" inbound_id="${6:-0}" existing_json="${7:-}"
   local protocol settings stream sniffing short_id key_pair private_key public_key
-  local old_settings old_stream old_private old_public old_short_ids old_target old_server_names
+  local old_settings old_stream old_private old_public old_short_ids old_target old_server_names cert_pair cert_file key_file
   old_settings="$(existing_inbound_settings "$existing_json")"
   old_stream="$(existing_inbound_stream "$existing_json")"
   sniffing='{"enabled":true,"destOverride":["http","tls","quic","fakedns"],"metadataOnly":false,"routeOnly":false,"ipsExcluded":[],"domainsExcluded":[]}'
@@ -1925,10 +2027,15 @@ build_minimal_inbound_payload() {
     hy2|hy2hop)
       protocol="hysteria"
       settings="$(printf "%s" "$old_settings" | jq -c '{version:2,clients:(.clients // [])}')"
+      cert_pair="$(node_web_cert_files "$node_id")"
+      cert_file="${cert_pair%%|*}"
+      key_file="${cert_pair#*|}"
       if [[ "$kind" == "hy2hop" ]]; then
         stream="$(jq -cn \
           --argjson old "$old_stream" \
           --arg ports "${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}" \
+          --arg certFile "$cert_file" \
+          --arg keyFile "$key_file" \
           '$old
           + {
             network:"hysteria",
@@ -1946,7 +2053,28 @@ build_minimal_inbound_payload() {
                 }}}
               )
             }),
-            tlsSettings:($old.tlsSettings // {serverName:"",alpn:["h3"],fingerprint:"",echConfigList:"",verifyPeerCertByName:"",pinnedPeerCertSha256:""}),
+            tlsSettings:(
+              ($old.tlsSettings // {})
+              + {
+                serverName:($old.tlsSettings.serverName // ""),
+                minVersion:($old.tlsSettings.minVersion // "1.2"),
+                maxVersion:($old.tlsSettings.maxVersion // "1.3"),
+                cipherSuites:($old.tlsSettings.cipherSuites // ""),
+                rejectUnknownSni:($old.tlsSettings.rejectUnknownSni // false),
+                disableSystemRoot:($old.tlsSettings.disableSystemRoot // false),
+                enableSessionResumption:($old.tlsSettings.enableSessionResumption // false),
+                alpn:($old.tlsSettings.alpn // ["h3"]),
+                echServerKeys:($old.tlsSettings.echServerKeys // ""),
+                settings:($old.tlsSettings.settings // {fingerprint:"",echConfigList:"",pinnedPeerCertSha256:[]}),
+                certificates:(
+                  if (($old.tlsSettings.certificates // []) | length) > 0 then
+                    $old.tlsSettings.certificates
+                  else
+                    [{certificateFile:$certFile,keyFile:$keyFile,certificate:[],key:[],ocspStapling:3600,oneTimeLoading:false,usage:"encipherment",buildChain:false}]
+                  end
+                )
+              }
+            ),
             finalmask:(
               ($old.finalmask // {})
               * {quicParams:{udpHop:{
@@ -1958,6 +2086,8 @@ build_minimal_inbound_payload() {
       else
         stream="$(jq -cn \
           --argjson old "$old_stream" \
+          --arg certFile "$cert_file" \
+          --arg keyFile "$key_file" \
           '$old
           + {
             network:"hysteria",
@@ -1968,7 +2098,28 @@ build_minimal_inbound_payload() {
               udpIdleTimeout:($old.hysteriaSettings.udpIdleTimeout // 60),
               masquerade:($old.hysteriaSettings.masquerade // {type:"",dir:"",url:"",rewriteHost:false,insecure:false,content:"",headers:{},statusCode:0})
             }),
-            tlsSettings:($old.tlsSettings // {serverName:"",alpn:["h3"],fingerprint:"",echConfigList:"",verifyPeerCertByName:"",pinnedPeerCertSha256:""})
+            tlsSettings:(
+              ($old.tlsSettings // {})
+              + {
+                serverName:($old.tlsSettings.serverName // ""),
+                minVersion:($old.tlsSettings.minVersion // "1.2"),
+                maxVersion:($old.tlsSettings.maxVersion // "1.3"),
+                cipherSuites:($old.tlsSettings.cipherSuites // ""),
+                rejectUnknownSni:($old.tlsSettings.rejectUnknownSni // false),
+                disableSystemRoot:($old.tlsSettings.disableSystemRoot // false),
+                enableSessionResumption:($old.tlsSettings.enableSessionResumption // false),
+                alpn:($old.tlsSettings.alpn // ["h3"]),
+                echServerKeys:($old.tlsSettings.echServerKeys // ""),
+                settings:($old.tlsSettings.settings // {fingerprint:"",echConfigList:"",pinnedPeerCertSha256:[]}),
+                certificates:(
+                  if (($old.tlsSettings.certificates // []) | length) > 0 then
+                    $old.tlsSettings.certificates
+                  else
+                    [{certificateFile:$certFile,keyFile:$keyFile,certificate:[],key:[],ocspStapling:3600,oneTimeLoading:false,usage:"encipherment",buildChain:false}]
+                  end
+                )
+              }
+            )
           }')"
       fi
       ;;
@@ -2033,6 +2184,10 @@ ensure_master_inbound() {
       echo "入站已保存，但无法确认入站 ID：$tag"
       return 1
     }
+    if ! master_inbound_saved_complete "$inbound_id" "$kind" "$node_id"; then
+      echo "入站保存后字段不完整：$remark"
+      return 1
+    fi
     ensure_master_client "$inbound_id" "$kind" || return 1
     return 0
   fi
@@ -2693,10 +2848,15 @@ self_check() {
 
 self_check_inbounds() {
   NODE_NAME="${NODE_NAME:-aktest}"
+  NODE_DOMAIN="${NODE_DOMAIN:-aktest.example.com}"
   generate_reality_keys_from_master() {
     printf "master-private-key|master-public-key"
   }
   local vless hy2 hy2hop
+  [[ "$(normalize_panel_url "https://example.com/base/panel/")" == "https://example.com/base" ]]
+  [[ "$(node_base_path_from_url "https://example.com/base/panel/")" == "/base/" ]]
+  PANEL_URL="https://example.com/base/panel/"
+  [[ "$(api_base_from_panel_url)" == "https://example.com/base/panel/api" ]]
   vless="$(build_minimal_inbound_payload 1 vless akvps-aktest-vless "aktest vless" "$AKVPS_VLESS_PORT" 0 "")"
   hy2="$(build_minimal_inbound_payload 1 hy2 akvps-aktest-hy2 "aktest hy2" "$AKVPS_HY2_PORT" 0 "")"
   hy2hop="$(build_minimal_inbound_payload 1 hy2hop akvps-aktest-hy2hop "aktest hy2端口跳跃" "$AKVPS_HY2_HOP_START" 0 "")"
@@ -2713,10 +2873,15 @@ self_check_inbounds() {
     and (.settings | fromjson | .version) == 2
     and (.settings | fromjson | .clients | length) == 0
     and (.streamSettings | fromjson | .network) == "hysteria"
-    and (.streamSettings | fromjson | .security) == "tls"' >/dev/null
+    and (.streamSettings | fromjson | .security) == "tls"
+    and (.streamSettings | fromjson | .tlsSettings.alpn[0]) == "h3"
+    and (.streamSettings | fromjson | .tlsSettings.certificates[0].certificateFile) == "/root/cert/aktest.example.com/fullchain.pem"
+    and (.streamSettings | fromjson | .tlsSettings.certificates[0].keyFile) == "/root/cert/aktest.example.com/privkey.pem"' >/dev/null
   printf "%s" "$hy2hop" | jq -e '
     (.streamSettings | fromjson | .finalmask.quicParams.udpHop.ports) == "39999-59999"
-    and (.streamSettings | fromjson | .hysteriaSettings.finalmask.quicParams.udpHop.ports) == "39999-59999"' >/dev/null
+    and (.streamSettings | fromjson | .hysteriaSettings.finalmask.quicParams.udpHop.ports) == "39999-59999"
+    and (.streamSettings | fromjson | .tlsSettings.certificates[0].certificateFile) == "/root/cert/aktest.example.com/fullchain.pem"
+    and (.streamSettings | fromjson | .tlsSettings.certificates[0].keyFile) == "/root/cert/aktest.example.com/privkey.pem"' >/dev/null
   build_client_payload "aktest-vless" 1 "xtls-rprx-vision" | jq -e '
     .client.email == "aktest-vless"
     and .client.subId == "aktest-vless-sub"
@@ -2725,9 +2890,10 @@ self_check_inbounds() {
   [[ "$(expected_client_link_scheme vless)" == "vless://" ]]
   [[ "$(expected_client_link_scheme hy2)" == "hysteria2://" ]]
   [[ "$(expected_client_link_scheme hy2hop)" == "hysteria2://" ]]
-  client_links_are_complete '{"success":true,"obj":["hysteria2://example?mport=39999-59999"]}' hy2hop "hysteria2://"
-  ! client_links_are_complete '{"success":true,"obj":["hysteria2://example"]}' hy2hop "hysteria2://"
-  client_links_are_complete '{"success":true,"obj":["vless://uuid@example:443?security=reality#aktest"]}' vless "vless://"
+  client_links_are_complete '{"success":true,"obj":["hysteria2://auth@example:39999?security=tls&mport=39999-59999"]}' hy2hop "hysteria2://"
+  ! client_links_are_complete '{"success":true,"obj":["hysteria2://auth@example:39999?security=tls"]}' hy2hop "hysteria2://"
+  client_links_are_complete '{"success":true,"obj":["vless://uuid@example:443?type=tcp&encryption=none&security=reality&pbk=pub&sid=abcd&sni=www.microsoft.com&fp=chrome&flow=xtls-rprx-vision#aktest"]}' vless "vless://"
+  ! client_links_are_complete '{"success":true,"obj":["vless://uuid@example:443?security=reality#aktest"]}' vless "vless://"
   ! client_links_are_complete '{"success":true,"obj":[]}' vless "vless://"
   client_credentials_complete '{"client":{"email":"aktest-vless","subId":"sub1","uuid":"uuid1","flow":"xtls-rprx-vision","enable":true}}' vless
   ! client_credentials_complete '{"client":{"email":"aktest-vless","subId":"","uuid":"uuid1","flow":"xtls-rprx-vision","enable":true}}' vless
