@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.80-mvp"
+AKVPS_VERSION="0.1.81-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -866,6 +866,83 @@ uninstall_akvps() {
   info "卸载脚本"
   rm -f /usr/local/bin/akvps
   echo "akvps 已卸载。3x-ui、Komari 和系统配置不会被删除。"
+  exit 0
+}
+
+stop_disable_service() {
+  local service="$1"
+  command -v systemctl >/dev/null 2>&1 || return 0
+  systemctl stop "$service" 2>/dev/null || true
+  systemctl disable "$service" 2>/dev/null || true
+  systemctl reset-failed "$service" 2>/dev/null || true
+}
+
+remove_systemd_service() {
+  local service="$1"
+  rm -f "/etc/systemd/system/${service}.service"
+}
+
+clear_komari_caddy_config() {
+  local caddyfile="/etc/caddy/Caddyfile" backup
+  [[ -f "$caddyfile" ]] || return 0
+  grep -q "127[.]0[.]0[.]1:${AKVPS_KOMARI_PORT}" "$caddyfile" 2>/dev/null || return 0
+  backup="${caddyfile}.bak.akvps-purge.$(date +%F-%H%M%S)"
+  cp -a "$caddyfile" "$backup" 2>/dev/null || true
+  cat > "$caddyfile" <<'EOF'
+# akvps purge cleared the Komari reverse proxy.
+EOF
+  if command -v caddy >/dev/null 2>&1; then
+    if caddy validate --config "$caddyfile" >/dev/null 2>&1; then
+      systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null || true
+    fi
+  fi
+  echo "已清理 Caddy 中的 Komari 反代配置，原文件已备份。"
+}
+
+purge_akvps_environment() {
+  need_root
+  info "完整清除本机环境"
+  cat <<EOF
+这个操作会删除本机：
+- akvps 配置、密钥、状态、报告和主程序
+- 3x-ui 服务、面板数据和程序目录
+- Komari 主站 / 探针服务、数据和程序目录
+- akvps 写入的系统调优文件和 SSH 附加配置文件
+
+不会清空防火墙规则，不会删除 root 的 SSH 密钥，不会删除 Cloudflare DNS 记录。
+删除后当前 akvps 会退出；需要再次使用时请重新安装。
+EOF
+  read -r -p "确认完整清除？请输入 清除本机 继续: " confirm
+  [[ "$confirm" == "清除本机" ]] || {
+    echo "已取消。"
+    return 0
+  }
+
+  echo "正在停止并删除 3x-ui..."
+  stop_disable_service x-ui
+  remove_systemd_service x-ui
+  rm -rf /usr/local/x-ui /etc/x-ui
+  rm -f /usr/bin/x-ui /usr/local/bin/x-ui
+
+  echo "正在停止并删除 Komari..."
+  stop_disable_service komari-agent
+  stop_disable_service komari
+  remove_systemd_service komari-agent
+  remove_systemd_service komari
+  rm -rf "$KOMARI_DIR" /etc/komari-agent /etc/komari /usr/local/komari
+  rm -f /usr/local/bin/komari /usr/local/bin/komari-agent /usr/bin/komari /usr/bin/komari-agent
+  clear_komari_caddy_config
+
+  echo "正在清除 akvps..."
+  rm -f "$AKVPS_SYSCTL" "$AKVPS_SSHD_CONF"
+  rm -rf "$AKVPS_DIR" /var/lib/akvps
+  rm -f /usr/local/bin/akvps
+
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+  sysctl --system >/dev/null 2>&1 || true
+
+  echo "完整清除已完成。"
   exit 0
 }
 
@@ -3786,7 +3863,8 @@ updates_menu() {
     echo "3. 更新 Komari 探针"
     echo "4. 清除所有设定"
     echo "5. 卸载脚本"
-    echo "6. 查看版本"
+    echo "6. 完整清除本机环境（危险）"
+    echo "7. 查看版本"
     echo "0. 返回"
     read -r -p "请选择: " sub
     case "$sub" in
@@ -3795,7 +3873,8 @@ updates_menu() {
       3) update_komari_agent; pause_menu ;;
       4) clear_akvps_settings; pause_menu ;;
       5) uninstall_akvps ;;
-      6) version; pause_menu ;;
+      6) purge_akvps_environment ;;
+      7) version; pause_menu ;;
       0) return ;;
     esac
   done
@@ -3874,6 +3953,7 @@ case "${1:-menu}" in
   verify-komari) verify_komari_agent ;;
   update-akvps) update_akvps ;;
   uninstall-akvps) uninstall_akvps ;;
+  purge-all|full-reset|reset-all|clean-all) purge_akvps_environment ;;
   restore-ssh-password) restore_ssh_password ;;
   *) main_menu ;;
 esac
