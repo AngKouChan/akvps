@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.76-mvp"
+AKVPS_VERSION="0.1.77-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -70,6 +70,7 @@ KOMARI_SERVER_REUSED=0
 AKVPS_AUTO_DEPLOY=0
 AKVPS_MOCK_API=0
 AKVPS_MOCK_STATE=""
+AKVPS_MOCK_NODE_TEST_FAIL=0
 
 die() {
   echo
@@ -1492,7 +1493,11 @@ xui_api_mock() {
       jq -c '{success:true,obj:.nodes}' "$AKVPS_MOCK_STATE"
       ;;
     "POST /nodes/test")
-      jq -cn '{success:true,obj:{status:"online",xrayState:"running",xrayError:"",xrayVersion:"mock"}}'
+      if [[ "${AKVPS_MOCK_NODE_TEST_FAIL:-0}" == "1" ]]; then
+        jq -cn '{success:false,msg:"mock tls verify failed",obj:{status:"offline",xrayState:"unknown"}}'
+      else
+        jq -cn '{success:true,obj:{status:"online",xrayState:"running",xrayError:"",xrayVersion:"mock"}}'
+      fi
       ;;
     "POST /nodes/certFingerprint")
       jq -cn '{success:true,obj:"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}'
@@ -1604,16 +1609,24 @@ xui_api() {
 
 build_node_payload() {
   local base_path address port tls_verify_mode pinned_cert
-  tls_verify_mode="${1:-skip}"
+  tls_verify_mode="${1:-verify}"
   pinned_cert="${2:-}"
   base_path="$(node_base_path_from_url "$NODE_XUI_URL")"
   address="$(url_host_from_url "$NODE_XUI_URL")"
   port="$(url_port_from_url "$NODE_XUI_URL")"
   [[ -n "$address" ]] || address="$NODE_DOMAIN"
-  [[ "$tls_verify_mode" == "pin" && -n "$pinned_cert" ]] || {
-    tls_verify_mode="skip"
-    pinned_cert=""
-  }
+  case "$tls_verify_mode" in
+    verify|skip)
+      pinned_cert=""
+      ;;
+    pin)
+      [[ -n "$pinned_cert" ]] || tls_verify_mode="skip"
+      ;;
+    *)
+      tls_verify_mode="verify"
+      pinned_cert=""
+      ;;
+  esac
   jq -n \
     --arg name "$NODE_NAME" \
     --arg address "$address" \
@@ -1640,8 +1653,16 @@ build_node_payload() {
     }'
 }
 
-node_pinned_payload() {
-  local base_payload="$1" fingerprint response
+node_tls_payload() {
+  local base_payload fingerprint response test_payload
+  test_payload="$(build_node_payload verify)"
+  response="$(xui_api POST "/nodes/test" "$test_payload" 2>/dev/null || true)"
+  if printf "%s" "$response" | json_success; then
+    printf "%s" "$test_payload"
+    return 0
+  fi
+
+  base_payload="$(build_node_payload skip)"
   response="$(xui_api POST "/nodes/certFingerprint" "$base_payload" 2>/dev/null || true)"
   fingerprint="$(printf "%s" "$response" | jq -r 'if .success == true then (.obj // "") else "" end' 2>/dev/null || true)"
   if [[ -n "$fingerprint" ]]; then
@@ -2397,7 +2418,7 @@ ensure_master_inbounds() {
 
 verify_master_node_runtime() {
   local payload response status xray_state msg i
-  payload="$(node_pinned_payload "$(build_node_payload)")"
+  payload="$(node_tls_payload)"
   for i in $(seq 1 6); do
     response="$(xui_api POST "/nodes/test" "$payload")" || return 1
     status="$(printf "%s" "$response" | jq -r '.obj.status // empty')"
@@ -2436,7 +2457,7 @@ connect_node_to_master() {
     sleep 5
   done
   [[ "$status" == "online" && "$xray_state" != "failed" && "$xray_state" != "error" ]] || die "主控未确认节点和 Xray 正常。" "请检查节点域名、11123 端口、节点 API Token、Xray 状态。主控返回：${msg:-unknown}"
-  payload="$(node_pinned_payload "$payload")"
+  payload="$(node_tls_payload)"
 
   info "接入主控面板"
   local existing_id action
@@ -3256,9 +3277,14 @@ self_check_master_flow() {
     (.obj | type) == "array"
     and any(.obj[]; contains("@" + $host + ":"))' \
     <<<"$(xui_api GET "/clients/subLinks/aktest-hy2hop-sub")" >/dev/null
-  node_pinned_payload "$(build_node_payload)" | jq -e '
+  node_tls_payload | jq -e '
+    .tlsVerifyMode == "verify" and .pinnedCertSha256 == ""
+  ' >/dev/null
+  AKVPS_MOCK_NODE_TEST_FAIL=1
+  node_tls_payload | jq -e '
     .tlsVerifyMode == "pin" and .pinnedCertSha256 != ""
   ' >/dev/null
+  AKVPS_MOCK_NODE_TEST_FAIL=0
 
   NODE_PROTOCOLS="hy2 / hy2端口跳跃"
   mock_state_cleanup
