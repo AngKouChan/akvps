@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.58-mvp"
+AKVPS_VERSION="0.1.59-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -2028,6 +2028,28 @@ protocol_short_text() {
   fi
 }
 
+print_node_import_template() {
+  local master_ipv4="${1:-$MASTER_IPV4}" master_ipv6="${2:-$MASTER_IPV6}" panel_domain="${3:-$PANEL_DOMAIN}" panel_url="${4:-$PANEL_URL}" panel_token="${5:-$PANEL_API_TOKEN}"
+  cat <<EOF
+AKVPS_ROOT_DOMAIN=${AKVPS_ROOT_DOMAIN}
+CLOUDFLARE_TOKEN=${CLOUDFLARE_TOKEN}
+MASTER_IPV4=${master_ipv4}
+MASTER_IPV6=${master_ipv6}
+PANEL_DOMAIN=${panel_domain}
+PANEL_URL=${panel_url}
+PANEL_API_TOKEN=${panel_token}
+NODE_NAME=请改成节点短名
+NODE_PROTOCOLS=vless / hy2端口跳跃
+RTT_MS=180
+VPS_MBPS=1000
+KOMARI_SERVER_DOMAIN=${KOMARI_SERVER_DOMAIN}
+KOMARI_ENDPOINT=${KOMARI_ENDPOINT}
+KOMARI_AUTO_DISCOVERY_KEY=${KOMARI_AUTO_DISCOVERY_KEY}
+KOMARI_MONTH_ROTATE=${KOMARI_MONTH_ROTATE:-1}
+END
+EOF
+}
+
 generate_report() {
   info "生成接入报告"
   REPORT_PATH="$AKVPS_REPORT_DIR/$(date +%F-%H%M%S)-${NODE_NAME}.md"
@@ -2139,12 +2161,7 @@ generate_panel_report() {
 - 其他 VPS 可复制下面内容，到「基础设置 -> 一键导入」粘贴。
 
 \`\`\`env
-MASTER_IPV4=${PUBLIC_IPV4}
-MASTER_IPV6=${PUBLIC_IPV6}
-PANEL_DOMAIN=${PANEL_DOMAIN}
-PANEL_URL=${XUI_ACCESS_URL}
-PANEL_API_TOKEN=${XUI_API_TOKEN}
-END
+$(print_node_import_template "$PUBLIC_IPV4" "$PUBLIC_IPV6" "$PANEL_DOMAIN" "$XUI_ACCESS_URL" "$XUI_API_TOKEN")
 \`\`\`
 
 EOF
@@ -2676,15 +2693,7 @@ show_master_import_card() {
   cat <<EOF
 把下面内容复制到其他 VPS 的「基础设置 -> 一键导入」：
 
-MASTER_IPV4=${MASTER_IPV4}
-MASTER_IPV6=${MASTER_IPV6}
-PANEL_DOMAIN=${PANEL_DOMAIN}
-PANEL_URL=${PANEL_URL}
-PANEL_API_TOKEN=${PANEL_API_TOKEN}
-KOMARI_SERVER_DOMAIN=${KOMARI_SERVER_DOMAIN}
-KOMARI_ENDPOINT=${KOMARI_ENDPOINT}
-KOMARI_AUTO_DISCOVERY_KEY=${KOMARI_AUTO_DISCOVERY_KEY}
-END
+$(print_node_import_template)
 EOF
 }
 
