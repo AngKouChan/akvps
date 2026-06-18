@@ -12,11 +12,20 @@ need_root() {
 }
 
 install_akvps() {
+  local latest_sha source_url tmp_file
   if [[ "${AKVPS_USE_LOCAL:-0}" == "1" && -f "./akvps" ]]; then
     install -m 0755 "./akvps" "$AKVPS_BIN"
   else
     tmp_file="$(mktemp)"
-    curl -fsSL "$AKVPS_REPO_RAW/akvps" -o "$tmp_file"
+    latest_sha="$(curl -fsSL --connect-timeout 10 --max-time 30 https://api.github.com/repos/AngKouChan/akvps/commits/main 2>/dev/null \
+      | sed -n 's/^[[:space:]]*"sha": *"\([0-9a-f]\{40\}\)".*/\1/p' \
+      | head -n1 || true)"
+    if [[ -n "$latest_sha" ]]; then
+      source_url="https://raw.githubusercontent.com/AngKouChan/akvps/${latest_sha}/akvps"
+    else
+      source_url="$AKVPS_REPO_RAW/akvps"
+    fi
+    curl -fsSL "$source_url" -o "$tmp_file"
     install -m 0755 "$tmp_file" "$AKVPS_BIN"
     rm -f "$tmp_file"
   fi

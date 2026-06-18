@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.45-mvp"
+AKVPS_VERSION="0.1.46-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1069,18 +1069,27 @@ download_temp_xray_bin() {
   return 0
 }
 
+run_xray_x25519() {
+  local bin="$1" out private public
+  [[ -n "$bin" && -x "$bin" ]] || return 1
+  out="$("$bin" x25519 2>/dev/null || true)"
+  private="$(printf "%s" "$out" | awk -F': *' 'tolower($1) ~ /private key/ {print $2; exit}')"
+  public="$(printf "%s" "$out" | awk -F': *' 'tolower($1) ~ /public key/ {print $2; exit}')"
+  [[ -n "$private" && -n "$public" ]] || return 1
+  printf "%s|%s" "$private" "$public"
+}
+
 generate_reality_keys() {
-  local bin out private public tmp_dir=""
+  local bin pair private public tmp_dir=""
   bin="$(xray_bin)"
-  if [[ -z "$bin" ]]; then
+  pair="$(run_xray_x25519 "$bin" 2>/dev/null || true)"
+  if [[ -z "$pair" ]]; then
     bin="$(download_temp_xray_bin)"
     [[ "$bin" == /tmp/akvps-xray.*/* ]] && tmp_dir="${bin%/*}"
+    pair="$(run_xray_x25519 "$bin" 2>/dev/null || true)"
   fi
-  if [[ -n "$bin" ]]; then
-    out="$("$bin" x25519 2>/dev/null || true)"
-    private="$(printf "%s" "$out" | awk -F': ' 'tolower($1) ~ /private key/ {print $2; exit}')"
-    public="$(printf "%s" "$out" | awk -F': ' 'tolower($1) ~ /public key/ {print $2; exit}')"
-  fi
+  private="${pair%%|*}"
+  public="${pair#*|}"
   if [[ -z "$private" || -z "$public" ]]; then
     private=""
     public=""
