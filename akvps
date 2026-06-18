@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.41-mvp"
+AKVPS_VERSION="0.1.42-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1009,7 +1009,31 @@ random_uuid() {
 }
 
 xray_bin() {
-  command -v xray 2>/dev/null || command -v /usr/local/bin/xray 2>/dev/null || command -v /usr/local/x-ui/bin/xray 2>/dev/null || true
+  local candidate found
+  for candidate in \
+    "$(command -v xray 2>/dev/null || true)" \
+    /usr/local/bin/xray \
+    /usr/bin/xray \
+    /usr/local/x-ui/bin/xray \
+    /usr/local/x-ui/bin/xray-linux-amd64 \
+    /usr/local/x-ui/bin/xray-linux-arm64 \
+    /usr/local/x-ui/xray \
+    /opt/xray/xray; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      printf "%s" "$candidate"
+      return 0
+    fi
+  done
+
+  if [[ -d /usr/local/x-ui ]]; then
+    found="$(find /usr/local/x-ui -type f \( -name 'xray' -o -name 'xray-*' -o -name 'xray-linux-*' \) -perm -111 2>/dev/null | sort | head -n1 || true)"
+    if [[ -n "$found" ]]; then
+      printf "%s" "$found"
+      return 0
+    fi
+  fi
+
+  return 0
 }
 
 generate_reality_keys() {
