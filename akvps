@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.37-mvp"
+AKVPS_VERSION="0.1.38-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -269,44 +269,14 @@ save_import_pair() {
     PANEL_URL|MASTER_PANEL_URL|XUI_PANEL_URL)
       save_config_var "PANEL_URL" "$value"
       ;;
-    NODE_NAME)
-      save_config_var "NODE_NAME" "$value"
-      ;;
-    NODE_DOMAIN)
-      save_config_var "NODE_DOMAIN" "$value"
-      ;;
     NODE_XUI_URL|NODE_URL)
       save_config_var "NODE_XUI_URL" "$value"
-      ;;
-    NODE_PROTOCOLS|NODE_TYPE)
-      save_config_var "NODE_PROTOCOLS" "$value"
-      ;;
-    TUNING_MODE)
-      save_config_var "TUNING_MODE" "$value"
-      ;;
-    LOCAL_DOWN_MBPS)
-      save_config_var "LOCAL_DOWN_MBPS" "$value"
-      ;;
-    LOCAL_UP_MBPS)
-      save_config_var "LOCAL_UP_MBPS" "$value"
-      ;;
-    VPS_MBPS)
-      save_config_var "VPS_MBPS" "$value"
-      ;;
-    RTT_MS)
-      save_config_var "RTT_MS" "$value"
-      ;;
-    LINE_QUALITY)
-      save_config_var "LINE_QUALITY" "$value"
       ;;
     KOMARI_SERVER_DOMAIN)
       save_config_var "KOMARI_SERVER_DOMAIN" "$value"
       ;;
     KOMARI_ENDPOINT|KOMARI_URL|KOMARI_SERVER_URL)
       save_config_var "KOMARI_ENDPOINT" "$value"
-      ;;
-    KOMARI_MONTH_ROTATE)
-      save_config_var "KOMARI_MONTH_ROTATE" "$value"
       ;;
     KOMARI_AUTO_DISCOVERY_KEY|KOMARI_DISCOVERY_KEY|AUTO_DISCOVERY_KEY)
       save_secret_var "KOMARI_AUTO_DISCOVERY_KEY" "$value"
@@ -376,11 +346,6 @@ import_all_info() {
   echo "KOMARI_SERVER_DOMAIN=探针主站域名"
   echo "KOMARI_ENDPOINT=探针主站地址"
   echo "KOMARI_AUTO_DISCOVERY_KEY=Komari 自动发现密钥"
-  echo "NODE_NAME=本机节点短名"
-  echo "NODE_PROTOCOLS=vless / hy2 / hy2端口跳跃"
-  echo "RTT_MS=本地到 VPS 延迟，例如 135"
-  echo "LINE_QUALITY=线路质量，1稳定 2波动 3丢包明显"
-  echo "KOMARI_MONTH_ROTATE=探针月重置日，0到31"
   paste_import_lines "粘贴导入"
 }
 
@@ -669,19 +634,6 @@ check_ports() {
 
 prompt_node() {
   info "节点信息"
-  if [[ "$AKVPS_AUTO_DEPLOY" == "1" && -n "$NODE_NAME" ]]; then
-    NODE_NAME="${NODE_NAME// /}"
-    NODE_NAME="${NODE_NAME,,}"
-    NODE_DOMAIN="${NODE_DOMAIN:-${NODE_NAME}.${AKVPS_ROOT_DOMAIN}}"
-    valid_domain "$NODE_DOMAIN" || die "节点域名不正确：$NODE_DOMAIN" "请检查一键导入里的 NODE_NAME 或 NODE_DOMAIN。"
-    echo "节点域名：$NODE_DOMAIN"
-    save_config_var "NODE_NAME" "$NODE_NAME"
-    save_config_var "NODE_DOMAIN" "$NODE_DOMAIN"
-    return
-  fi
-  if [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
-    die "缺少节点短名。" "请在一键导入里填写 NODE_NAME。"
-  fi
   while true; do
     read -r -p "请输入节点短名，例如 jp1: " NODE_NAME
     NODE_NAME="${NODE_NAME// /}"
@@ -695,21 +647,6 @@ prompt_node() {
 
 prompt_protocols() {
   info "协议准备"
-  if [[ "$AKVPS_AUTO_DEPLOY" == "1" && -n "$NODE_PROTOCOLS" ]]; then
-    local proto="${NODE_PROTOCOLS,,}"
-    SELECT_VLESS=0
-    SELECT_HY2=0
-    SELECT_HY2_HOP=0
-    [[ "$proto" == *"vless"* ]] && SELECT_VLESS=1
-    [[ "$proto" == *"hy2"* || "$proto" == *"hysteria"* ]] && SELECT_HY2=1
-    [[ "$proto" == *"hop"* || "$proto" == *"跳跃"* ]] && SELECT_HY2=1 && SELECT_HY2_HOP=1
-    [[ "$SELECT_VLESS" -eq 1 || "$SELECT_HY2" -eq 1 ]] || die "节点协议不正确：$NODE_PROTOCOLS" "请填写 vless、hy2 或 hy2端口跳跃。"
-    echo "已选择：$(protocol_short_text)"
-    return
-  fi
-  if [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
-    die "缺少节点协议。" "请在一键导入里填写 NODE_PROTOCOLS，例如 vless 或 hy2端口跳跃。"
-  fi
   echo "可多选，例如 1 2"
   echo "1. VLESS Reality"
   echo "2. Hysteria2"
@@ -875,20 +812,6 @@ setup_swap() {
 
 prompt_tuning() {
   info "调优选择"
-  if [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
-    TUNING_MODE="${TUNING_MODE:-smart}"
-    LOCAL_DOWN_MBPS="${LOCAL_DOWN_MBPS:-1000}"
-    LOCAL_UP_MBPS="${LOCAL_UP_MBPS:-50}"
-    VPS_MBPS="${VPS_MBPS:-1000}"
-    LINE_QUALITY="${LINE_QUALITY:-1}"
-    [[ -n "$RTT_MS" ]] || die "缺少延迟信息。" "请在一键导入里填写 RTT_MS，例如 135。"
-    echo "调优模式：$TUNING_MODE"
-    echo "本地下载/上传：${LOCAL_DOWN_MBPS}/${LOCAL_UP_MBPS} Mbps"
-    echo "VPS 标称：${VPS_MBPS} Mbps"
-    echo "平均延迟：${RTT_MS} ms"
-    echo "线路质量：$LINE_QUALITY"
-    return
-  fi
   read -r -p "是否启用智能调优？[Y/n] " ans
   ans="${ans:-Y}"
   if [[ "$ans" =~ ^[Nn]$ ]]; then
@@ -1533,19 +1456,14 @@ prompt_komari() {
     done
   fi
   save_config_var "KOMARI_ENDPOINT" "$KOMARI_ENDPOINT"
-  if [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
-    [[ "$KOMARI_MONTH_ROTATE" =~ ^([0-9]|[12][0-9]|3[01])$ ]] || die "缺少探针月重置日。" "请在一键导入里填写 KOMARI_MONTH_ROTATE，0 到 31。"
-    echo "网络统计月重置日：$KOMARI_MONTH_ROTATE"
-  else
-    KOMARI_MONTH_ROTATE=""
-    while true; do
-      read -r -p "请输入网络统计月重置日，0=禁用，1-31=每月日期: " KOMARI_MONTH_ROTATE
-      if [[ "$KOMARI_MONTH_ROTATE" =~ ^([0-9]|[12][0-9]|3[01])$ ]]; then
-        break
-      fi
-      echo "请输入 0 到 31 之间的数字。"
-    done
-  fi
+  KOMARI_MONTH_ROTATE=""
+  while true; do
+    read -r -p "请输入网络统计月重置日，0=禁用，1-31=每月日期: " KOMARI_MONTH_ROTATE
+    if [[ "$KOMARI_MONTH_ROTATE" =~ ^([0-9]|[12][0-9]|3[01])$ ]]; then
+      break
+    fi
+    echo "请输入 0 到 31 之间的数字。"
+  done
   save_config_var "KOMARI_MONTH_ROTATE" "$KOMARI_MONTH_ROTATE"
   if [[ -n "$KOMARI_AUTO_DISCOVERY_KEY" ]]; then
     echo "已使用 Komari 自动发现密钥，将自动注册本机。"
@@ -1985,11 +1903,6 @@ PANEL_API_TOKEN=${PANEL_API_TOKEN}
 KOMARI_SERVER_DOMAIN=${KOMARI_SERVER_DOMAIN}
 KOMARI_ENDPOINT=${KOMARI_ENDPOINT}
 KOMARI_AUTO_DISCOVERY_KEY=${KOMARI_AUTO_DISCOVERY_KEY}
-NODE_NAME=
-NODE_PROTOCOLS=
-RTT_MS=
-LINE_QUALITY=1
-KOMARI_MONTH_ROTATE=
 END
 EOF
 }
