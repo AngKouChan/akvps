@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.21-mvp"
+AKVPS_VERSION="0.1.22-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -382,18 +382,18 @@ show_saved_info() {
 
 status_label() {
   if [[ -n "$1" ]]; then
-    color_text green "已配置"
+    color_text green "☑"
   else
-    color_text yellow "未配置"
+    color_text yellow "☐"
   fi
 }
 
 service_label() {
   local service="$1"
   if systemctl is-active --quiet "$service" 2>/dev/null; then
-    color_text green "运行中"
+    color_text green "☑"
   else
-    color_text yellow "未运行"
+    color_text yellow "☐"
   fi
 }
 
@@ -424,11 +424,11 @@ show_dashboard() {
   echo "- 本机角色：${roles:-$(color_text yellow "未部署")}"
   echo "- IPv4：${ipv4:-未检测到}"
   echo "- IPv6：${ipv6:-未检测到}"
-  echo "- 基础信息：主控IPv4 $(status_label "$MASTER_IPV4")，Cloudflare Token $(status_label "$CLOUDFLARE_TOKEN")"
-  echo "- 主控面板：$(status_label "$PANEL_URL")，3x-ui ${xui_status}"
-  echo "- 代理节点：$(status_label "$NODE_XUI_URL")"
-  echo "- 探针Agent：$(status_label "$KOMARI_TOKEN")，服务 ${komari_agent_status}"
-  echo "- 探针主站：$(status_label "$KOMARI_SERVER_DOMAIN")，服务 ${komari_server_status}"
+  echo "- 基础信息：$(status_label "$MASTER_IPV4") 主控IPv4  $(status_label "$CLOUDFLARE_TOKEN") Cloudflare Token"
+  echo "- 主控面板：$(status_label "$PANEL_URL") 面板信息  ${xui_status} 3x-ui服务"
+  echo "- 代理节点：$(status_label "$NODE_XUI_URL") 节点信息"
+  echo "- 探针Agent：$(status_label "$KOMARI_TOKEN") Agent信息  ${komari_agent_status} Agent服务"
+  echo "- 探针主站：$(status_label "$KOMARI_SERVER_DOMAIN") 主站信息  ${komari_server_status} 主站服务"
   echo
 }
 
@@ -1360,7 +1360,11 @@ generate_komari_server_report() {
   access_url="http://${KOMARI_SERVER_DOMAIN}:${AKVPS_KOMARI_PORT}"
   save_config_var "KOMARI_SERVER_DOMAIN" "$KOMARI_SERVER_DOMAIN"
   save_config_var "KOMARI_ENDPOINT" "$access_url"
-  password="$(journalctl -u komari --since "10 minutes ago" 2>/dev/null | grep "admin account created." | tail -n 1 | sed -e 's/.*admin account created.//' | xargs || true)"
+  password="$(journalctl -u komari --since "10 minutes ago" 2>/dev/null \
+    | grep "admin account created." \
+    | tail -n 1 \
+    | sed -E 's/.*Password: ([^ ,)]+).*/\1/' \
+    | xargs || true)"
   if [[ "$KOMARI_SERVER_REUSED" -eq 1 ]]; then
     password_text="已有主站，请使用现有账号密码"
   else
