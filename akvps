@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.19-mvp"
+AKVPS_VERSION="0.1.20-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1345,8 +1345,9 @@ install_komari_server() {
   tmp_file="$(mktemp)"
   curl -fsSL https://raw.githubusercontent.com/komari-monitor/komari/main/install-komari.sh -o "$tmp_file"
   chmod +x "$tmp_file"
-  printf "\n" | "$tmp_file"
+  printf "1\n\n" | "$tmp_file"
   rm -f "$tmp_file"
+  systemctl is-active --quiet komari 2>/dev/null || die "Komari 主站安装后未运行。" "请查看 journalctl -u komari -n 80。"
 }
 
 generate_komari_server_report() {
@@ -1354,6 +1355,7 @@ generate_komari_server_report() {
   KOMARI_SERVER_REPORT_PATH="$AKVPS_REPORT_DIR/$(date +%F-%H%M%S)-komari-server-${KOMARI_SERVER_NAME}.md"
   local status_server access_url password password_text
   status_server="$(systemctl is-active komari 2>/dev/null || echo unknown)"
+  [[ "$status_server" == "active" ]] || die "Komari 主站未正常运行。" "请查看 journalctl -u komari -n 80。"
   access_url="http://${KOMARI_SERVER_DOMAIN}:${AKVPS_KOMARI_PORT}"
   save_config_var "KOMARI_SERVER_DOMAIN" "$KOMARI_SERVER_DOMAIN"
   save_config_var "KOMARI_ENDPOINT" "$access_url"
