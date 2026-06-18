@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.43-mvp"
+AKVPS_VERSION="0.1.44-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -721,9 +721,10 @@ restore_ssh_password() {
 update_akvps() {
   need_root
   info "更新脚本"
-  local tmp_file
+  local tmp_file cache_bust
   tmp_file="$(mktemp)"
-  curl -fsSL https://raw.githubusercontent.com/AngKouChan/akvps/main/akvps -o "$tmp_file"
+  cache_bust="$(date +%s)"
+  curl -fsSL -H "Cache-Control: no-cache" "https://raw.githubusercontent.com/AngKouChan/akvps/main/akvps?ts=${cache_bust}" -o "$tmp_file"
   install -m 0755 "$tmp_file" /usr/local/bin/akvps
   rm -f "$tmp_file"
   echo "akvps 已更新，正在重新打开新版菜单..."
