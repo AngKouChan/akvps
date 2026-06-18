@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.17-mvp"
+AKVPS_VERSION="0.1.18-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -61,6 +61,7 @@ XUI_ACCESS_URL=""
 PANEL_REPORT_PATH=""
 KOMARI_REPORT_PATH=""
 KOMARI_SERVER_REPORT_PATH=""
+KOMARI_SERVER_REUSED=0
 
 die() {
   echo
@@ -1306,7 +1307,13 @@ prompt_komari_server() {
 
 install_komari_server() {
   info "安装 Komari 主站"
+  KOMARI_SERVER_REUSED=0
   if port_in_use "$AKVPS_KOMARI_PORT"; then
+    if systemctl is-active --quiet komari 2>/dev/null; then
+      echo "检测到已安装 Komari 主站，复用现有安装。"
+      KOMARI_SERVER_REUSED=1
+      return 0
+    fi
     die "端口 $AKVPS_KOMARI_PORT 已被占用。" "请先释放端口，再重新运行 akvps。"
   fi
   tmp_file="$(mktemp)"
@@ -1319,12 +1326,17 @@ install_komari_server() {
 generate_komari_server_report() {
   info "生成 Komari 主站卡片"
   KOMARI_SERVER_REPORT_PATH="$AKVPS_REPORT_DIR/$(date +%F-%H%M%S)-komari-server-${KOMARI_SERVER_NAME}.md"
-  local status_server access_url password
+  local status_server access_url password password_text
   status_server="$(systemctl is-active komari 2>/dev/null || echo unknown)"
   access_url="http://${KOMARI_SERVER_DOMAIN}:${AKVPS_KOMARI_PORT}"
   save_config_var "KOMARI_SERVER_DOMAIN" "$KOMARI_SERVER_DOMAIN"
   save_config_var "KOMARI_ENDPOINT" "$access_url"
   password="$(journalctl -u komari --since "10 minutes ago" 2>/dev/null | grep "admin account created." | tail -n 1 | sed -e 's/.*admin account created.//' | xargs || true)"
+  if [[ "$KOMARI_SERVER_REUSED" -eq 1 ]]; then
+    password_text="已有主站，请使用现有账号密码"
+  else
+    password_text="${password:-请查看 journalctl -u komari}"
+  fi
   cat > "$KOMARI_SERVER_REPORT_PATH" <<EOF
 # akvps Komari 主站卡片
 
@@ -1335,7 +1347,7 @@ generate_komari_server_report() {
 | 访问地址 | ${access_url} |
 | 端口 | ${AKVPS_KOMARI_PORT} |
 | 用户名 | admin |
-| 初始密码 | ${password:-请查看 journalctl -u komari} |
+| 初始密码 | ${password_text} |
 | 服务状态 | ${status_server} |
 
 EOF

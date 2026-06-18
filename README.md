@@ -123,6 +123,7 @@ akvps
 - 输入主站短名，生成 `主站短名.kouzho.cc`。
 - 复用 Cloudflare Token，自动新增或更新 DNS，小灰云。
 - 使用 Komari 官方主站安装脚本。
+- 如果本机已经运行 Komari 主站，会复用现有安装。
 - 默认端口 `25774`。
 - 输出 Komari 主站卡片。
 - 暂不配置 HTTPS / 反向代理，后续再补。
