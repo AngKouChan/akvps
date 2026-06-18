@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.79-mvp"
+AKVPS_VERSION="0.1.80-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -166,6 +166,7 @@ load_envs() {
   NODE_XUI_URL="${NODE_XUI_URL:-}"
   NODE_XUI_API_TOKEN="${NODE_XUI_API_TOKEN:-}"
   NODE_PROTOCOLS="${NODE_PROTOCOLS:-}"
+  XUI_WEB_BASE_PATH="${XUI_WEB_BASE_PATH:-}"
   TUNING_MODE="${TUNING_MODE:-smart}"
   LOCAL_DOWN_MBPS="${LOCAL_DOWN_MBPS:-1000}"
   LOCAL_UP_MBPS="${LOCAL_UP_MBPS:-50}"
@@ -1610,6 +1611,58 @@ xui_api() {
   fi
 }
 
+local_xui_web_base_path() {
+  local base
+  base="${XUI_WEB_BASE_PATH:-}"
+  if [[ -z "$base" && -n "${NODE_XUI_URL:-}" ]]; then
+    base="$(node_base_path_from_url "$NODE_XUI_URL")"
+    base="${base#/}"
+    base="${base%/}"
+  fi
+  if [[ -z "$base" && -r "$XUI_DB" ]]; then
+    base="$(sqlite3 "$XUI_DB" "select value from settings where key='webBasePath';" 2>/dev/null | head -n1 || true)"
+    base="${base#/}"
+    base="${base%/}"
+  fi
+  printf "%s" "$base"
+}
+
+local_xui_api_base() {
+  local base
+  base="$(local_xui_web_base_path)"
+  [[ -n "$base" ]] || return 1
+  printf "https://127.0.0.1:%s/%s/panel/api" "$AKVPS_XUI_PORT" "$base"
+}
+
+local_xui_api() {
+  local method="$1" path="$2" data="${3:-}"
+  local api_base response status body
+  api_base="$(local_xui_api_base)" || return 1
+  if [[ -n "$data" ]]; then
+    response="$(curl -ksS -X "$method" "${api_base}${path}" \
+      -H "Authorization: Bearer ${NODE_XUI_API_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -H "X-Requested-With: XMLHttpRequest" \
+      --data "$data" \
+      -w $'\n%{http_code}' 2>/dev/null || true)"
+  else
+    response="$(curl -ksS -X "$method" "${api_base}${path}" \
+      -H "Authorization: Bearer ${NODE_XUI_API_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -H "X-Requested-With: XMLHttpRequest" \
+      -w $'\n%{http_code}' 2>/dev/null || true)"
+  fi
+  status="$(printf "%s" "$response" | tail -n 1)"
+  body="$(printf "%s" "$response" | sed '$d')"
+  if [[ "$status" =~ ^2[0-9][0-9]$ ]]; then
+    printf "%s" "$body"
+    return 0
+  fi
+  echo "本机节点 API 返回 HTTP ${status:-unknown}。" >&2
+  [[ -n "$body" ]] && echo "本机返回：$(printf "%s" "$body" | tr '\n' ' ' | head -c 160)" >&2
+  return 1
+}
+
 build_node_payload() {
   local base_path address port tls_verify_mode pinned_cert
   tls_verify_mode="${1:-verify}"
@@ -1870,6 +1923,107 @@ inbound_client_complete() {
           end
         )
       )' >/dev/null 2>&1
+}
+
+local_inbound_id_by_tag() {
+  local tag="$1"
+  [[ -n "$NODE_XUI_API_TOKEN" ]] || return 1
+  local_xui_api GET "/inbounds/list" | jq -r --arg tag "$tag" '.obj[]? | select(.tag == $tag) | .id' | head -n1
+}
+
+localize_inbound_payload() {
+  local inbound_json="$1" local_id="${2:-0}"
+  printf "%s" "$inbound_json" | jq -c --argjson id "$local_id" '
+    .id = $id
+    | .nodeId = 0
+    | .shareAddrStrategy = "node"
+    | .shareAddr = ""
+    | .settings = (
+        if (.settings | type) == "object" then (.settings | tojson)
+        else .settings
+        end
+      )
+    | .streamSettings = (
+        if (.streamSettings | type) == "object" then (.streamSettings | tojson)
+        else .streamSettings
+        end
+      )
+    | .sniffing = (
+        if (.sniffing | type) == "object" then (.sniffing | tojson)
+        else .sniffing
+        end
+      )
+    | del(.clientStats, .originNodeGuid, .fallbackParent, .lastTrafficResetTime)
+  '
+}
+
+port_listening() {
+  local port="$1" proto="${2:-tcp}"
+  if command -v ss >/dev/null 2>&1; then
+    if [[ "$proto" == "udp" ]]; then
+      ss -lnup 2>/dev/null | awk '{print $5}' | grep -Eq "[:.]${port}$"
+    else
+      ss -lntp 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${port}$"
+    fi
+  else
+    return 1
+  fi
+}
+
+wait_for_port_listening() {
+  local port="$1" proto="${2:-tcp}" i
+  for i in $(seq 1 10); do
+    port_listening "$port" "$proto" && return 0
+    sleep 1
+  done
+  return 1
+}
+
+inbound_proto_for_kind() {
+  case "$1" in
+    vless) printf "tcp" ;;
+    hy2|hy2hop) printf "udp" ;;
+    *) printf "tcp" ;;
+  esac
+}
+
+sync_inbound_to_local_node() {
+  local master_inbound_id="$1" kind="$2" tag="$3" port="$4"
+  local inbound_json local_id payload path response msg action proto
+  [[ "${AKVPS_MOCK_API:-0}" == "1" ]] && return 0
+  [[ -x "$XUI_BIN" && -n "$NODE_XUI_API_TOKEN" ]] || {
+    echo "跳过本机节点入站同步：未检测到本机 3x-ui 或节点 API Token。"
+    return 0
+  }
+  inbound_json="$(master_inbound_by_id "$master_inbound_id" 2>/dev/null || true)"
+  [[ -n "$inbound_json" ]] || {
+    echo "无法读取主控入站，不能同步到节点本机：$tag"
+    return 1
+  }
+  local_id="$(local_inbound_id_by_tag "$tag" 2>/dev/null || true)"
+  if [[ -n "$local_id" ]]; then
+    payload="$(localize_inbound_payload "$inbound_json" "$local_id")"
+    path="/inbounds/update/${local_id}"
+    action="已更新"
+  else
+    payload="$(localize_inbound_payload "$inbound_json" 0)"
+    path="/inbounds/add"
+    action="已创建"
+  fi
+  response="$(local_xui_api POST "$path" "$payload")" || return 1
+  if printf "%s" "$response" | json_success; then
+    echo "${action}节点本机入站：$tag"
+    proto="$(inbound_proto_for_kind "$kind")"
+    wait_for_port_listening "$port" "$proto" || {
+      echo "节点本机入站已保存，但端口未监听：${port}/${proto}"
+      return 1
+    }
+    echo "节点本机端口已监听：${port}/${proto}"
+    return 0
+  fi
+  msg="$(printf "%s" "$response" | jq -r '.msg // empty')"
+  echo "节点本机入站同步失败：${msg:-unknown}"
+  return 1
 }
 
 client_update_payload() {
@@ -2382,6 +2536,7 @@ ensure_master_inbound() {
       return 1
     fi
     ensure_master_client "$inbound_id" "$kind" || return 1
+    sync_inbound_to_local_node "$inbound_id" "$kind" "$tag" "$port" || return 1
     return 0
   fi
   msg="$(printf "%s" "$response" | jq -r '.msg // empty')"
@@ -2584,6 +2739,7 @@ install_or_configure_xui() {
     save_config_var "NODE_NAME" "$NODE_NAME"
     save_config_var "NODE_DOMAIN" "$NODE_DOMAIN"
     save_config_var "NODE_XUI_URL" "$XUI_ACCESS_URL"
+    save_config_var "XUI_WEB_BASE_PATH" "$XUI_WEB_BASE_PATH"
     save_secret_var "NODE_XUI_API_TOKEN" "$XUI_API_TOKEN"
     return 0
   fi
@@ -2617,6 +2773,7 @@ install_or_configure_xui() {
   save_config_var "NODE_NAME" "$NODE_NAME"
   save_config_var "NODE_DOMAIN" "$NODE_DOMAIN"
   save_config_var "NODE_XUI_URL" "$XUI_ACCESS_URL"
+  save_config_var "XUI_WEB_BASE_PATH" "$XUI_WEB_BASE_PATH"
   save_secret_var "NODE_XUI_API_TOKEN" "$XUI_API_TOKEN"
   curl -kfsS --max-time 10 "https://127.0.0.1:${AKVPS_XUI_PORT}/${XUI_WEB_BASE_PATH}" >/dev/null 2>&1 || true
 }
@@ -3183,6 +3340,12 @@ self_check_inbounds() {
     and (.streamSettings | fromjson | .realitySettings.shortIds[0]) == "oldsid"
     and (.streamSettings | fromjson | .realitySettings.target) == "old.example:443"
     and (.streamSettings | fromjson | .realitySettings.dest) == "old.example:443"' >/dev/null
+  localize_inbound_payload "$vless" 3 | jq -e '
+    .id == 3
+    and .nodeId == 0
+    and (.settings | type) == "string"
+    and (.streamSettings | type) == "string"
+    and (.sniffing | type) == "string"' >/dev/null
   hy2hop="$(build_minimal_inbound_payload 1 hy2hop akvps-aktest-hy2hop "aktest hy2端口跳跃" "$AKVPS_HY2_HOP_START" 8 '{"settings":{"clients":[{"email":"old-hy","id":"old-id"}]},"streamSettings":{"network":"hysteria","security":"tls","hysteriaSettings":{"version":2,"auth":"old-auth","udpIdleTimeout":120,"masquerade":{"type":"proxy","url":"https://old.example"},"finalmask":{"udp":[{"type":"salamander","settings":{"password":"oldpass"}}],"quicParams":{"udpHop":{"ports":"30000-40000","interval":"7-9"}}}},"tlsSettings":{"serverName":"old.example","alpn":["h3"],"fingerprint":"chrome"},"externalProxy":[{"forceTls":"same","dest":"node.example","port":443,"remark":"old"}],"finalmask":{"udp":[{"type":"salamander","settings":{"password":"oldpass"}}]}}}')"
   printf "%s" "$hy2hop" | jq -e '
     (.settings | fromjson | .clients[0].email) == "old-hy"
