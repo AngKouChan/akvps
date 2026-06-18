@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.38-mvp"
+AKVPS_VERSION="0.1.39-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1123,6 +1123,105 @@ build_node_payload() {
     }'
 }
 
+master_node_id() {
+  xui_api GET "/nodes/list" | jq -r --arg name "$NODE_NAME" '.obj[]? | select(.name == $name) | .id' | head -n1
+}
+
+master_inbound_id_by_tag() {
+  local tag="$1"
+  xui_api GET "/inbounds/list" | jq -r --arg tag "$tag" '.obj[]? | select(.tag == $tag) | .id' | head -n1
+}
+
+build_minimal_inbound_payload() {
+  local node_id="$1" kind="$2" tag="$3" remark="$4" port="$5" protocol settings stream sniffing
+  sniffing='{"enabled":true,"destOverride":["http","tls","quic","fakedns"],"metadataOnly":false,"routeOnly":false}'
+  case "$kind" in
+    vless)
+      protocol="vless"
+      settings='{"clients":[],"decryption":"none","fallbacks":[]}'
+      stream='{"network":"tcp","security":"reality","tcpSettings":{"acceptProxyProtocol":false,"header":{"type":"none"}},"realitySettings":{"show":false,"xver":0,"dest":"www.microsoft.com:443","serverNames":["www.microsoft.com"],"privateKey":"","minClient":"","maxClient":"","maxTimediff":0,"shortIds":[""],"settings":{"publicKey":"","fingerprint":"chrome","serverName":"","spiderX":"/"}}}'
+      ;;
+    hy2|hy2hop)
+      protocol="hysteria"
+      settings='{"clients":[],"ignoreClientBandwidth":false}'
+      stream='{"network":"udp","security":"tls","tlsSettings":{"serverName":"","minVersion":"1.2","maxVersion":"1.3","cipherSuites":"","certificates":[],"alpn":["h3"],"settings":{}}}'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  jq -n \
+    --arg remark "$remark" \
+    --arg protocol "$protocol" \
+    --arg settings "$settings" \
+    --arg streamSettings "$stream" \
+    --arg tag "$tag" \
+    --arg sniffing "$sniffing" \
+    --argjson nodeId "$node_id" \
+    --argjson port "$port" \
+    '{
+      up: 0,
+      down: 0,
+      total: 0,
+      remark: $remark,
+      enable: true,
+      expiryTime: 0,
+      listen: "",
+      port: $port,
+      protocol: $protocol,
+      settings: $settings,
+      streamSettings: $streamSettings,
+      tag: $tag,
+      sniffing: $sniffing,
+      nodeId: $nodeId,
+      trafficReset: "never",
+      shareAddrStrategy: "node",
+      shareAddr: ""
+    }'
+}
+
+ensure_master_inbound() {
+  local node_id="$1" kind="$2" tag="$3" remark="$4" port="$5" payload response msg
+  if [[ -n "$(master_inbound_id_by_tag "$tag" 2>/dev/null || true)" ]]; then
+    echo "入站已存在：$tag"
+    return 0
+  fi
+  payload="$(build_minimal_inbound_payload "$node_id" "$kind" "$tag" "$remark" "$port")" || return 1
+  response="$(xui_api POST "/inbounds/add" "$payload")" || return 1
+  if printf "%s" "$response" | json_success; then
+    echo "已创建入站：$remark"
+    return 0
+  fi
+  msg="$(printf "%s" "$response" | jq -r '.msg // empty')"
+  echo "入站创建失败：${msg:-unknown}"
+  return 1
+}
+
+ensure_master_inbounds() {
+  load_envs
+  [[ -n "$NODE_PROTOCOLS" ]] || return 0
+  local node_id proto="${NODE_PROTOCOLS,,}" ok=1
+  node_id="$(master_node_id 2>/dev/null || true)"
+  [[ -n "$node_id" ]] || {
+    echo "未找到主控节点 ID，跳过自动建入站。"
+    return 1
+  }
+  info "自动创建主控入站"
+  if [[ "$proto" == *"vless"* ]]; then
+    ensure_master_inbound "$node_id" "vless" "akvps-${NODE_NAME}-vless" "${NODE_NAME} vless" "$AKVPS_VLESS_PORT" || ok=0
+  fi
+  if [[ "$proto" == *"hy2"* ]]; then
+    ensure_master_inbound "$node_id" "hy2" "akvps-${NODE_NAME}-hy2" "${NODE_NAME} hy2" "$AKVPS_HY2_PORT" || ok=0
+  fi
+  if [[ "$proto" == *"跳跃"* || "$proto" == *"hop"* ]]; then
+    ensure_master_inbound "$node_id" "hy2hop" "akvps-${NODE_NAME}-hy2hop" "${NODE_NAME} hy2端口跳跃" "$AKVPS_HY2_HOP_START" || ok=0
+  fi
+  [[ "$ok" -eq 1 ]] || {
+    echo "提示：有入站未自动创建成功，可先在主控面板手动补。"
+    return 1
+  }
+}
+
 connect_node_to_master() {
   need_root
   ensure_dirs
@@ -1166,6 +1265,7 @@ connect_node_to_master() {
   existing_id="$(xui_api GET "/nodes/list" | jq -r --arg name "$NODE_NAME" '.obj[]? | select(.name == $name) | .id' | head -n1)" || existing_id=""
   [[ -n "$existing_id" ]] || die "主控列表里没有找到这个节点。" "请稍后在主控面板节点列表确认，或重新运行节点部署。"
   echo "验证通过：主控已存在节点 $NODE_NAME"
+  ensure_master_inbounds || true
 }
 
 verify_master_connection() {
