@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.25-mvp"
+AKVPS_VERSION="0.1.26-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -408,12 +408,16 @@ append_role() {
 
 show_dashboard() {
   load_envs
-  local ipv4 ipv6 xui_status komari_agent_status komari_server_status roles
+  local ipv4 ipv6 xui_status komari_agent_status komari_server_status roles role_master role_node role_agent role_komari_server
   ipv4="$(curl -4 -fsS --max-time 2 https://api4.ipify.org 2>/dev/null || true)"
   ipv6="$(curl -6 -fsS --max-time 2 https://api6.ipify.org 2>/dev/null || true)"
   xui_status="$(service_label x-ui)"
   komari_agent_status="$(service_label komari-agent)"
   komari_server_status="$(service_label komari)"
+  role_master="$([[ "$ROLE_MASTER_PANEL" == "1" ]] && echo yes || true)"
+  role_node="$([[ "$ROLE_NODE" == "1" ]] && echo yes || true)"
+  role_agent="$([[ "$ROLE_KOMARI_AGENT" == "1" ]] && echo yes || true)"
+  role_komari_server="$([[ "$ROLE_KOMARI_SERVER" == "1" ]] && echo yes || true)"
   roles=""
   [[ "$ROLE_MASTER_PANEL" == "1" ]] && roles="$(append_role "$roles" blue "主控面板")"
   [[ "$ROLE_KOMARI_SERVER" == "1" ]] && roles="$(append_role "$roles" magenta "探针主站")"
@@ -425,10 +429,11 @@ show_dashboard() {
   echo "- IPv4：${ipv4:-未检测到}"
   echo "- IPv6：${ipv6:-未检测到}"
   echo "- 基础信息：$(status_label "$MASTER_IPV4") 主控IPv4  $(status_label "$CLOUDFLARE_TOKEN") Cloudflare Token"
-  echo "- 主控面板：$(status_label "$PANEL_URL") 面板信息  ${xui_status} 3x-ui服务"
-  echo "- 代理节点：$(status_label "$NODE_XUI_URL") 节点信息"
-  echo "- 探针Agent：$(status_label "$KOMARI_TOKEN") Agent信息  ${komari_agent_status} Agent服务"
-  echo "- 探针主站：$(status_label "$KOMARI_SERVER_DOMAIN") 主站信息  ${komari_server_status} 主站服务"
+  echo "- 远端信息：$(status_label "$PANEL_URL") 主控信息  $(status_label "$KOMARI_ENDPOINT") 探针主站地址"
+  echo "- 本机主控：$(status_label "$role_master") 面板角色  ${xui_status} 3x-ui服务"
+  echo "- 本机节点：$(status_label "$role_node") 节点角色"
+  echo "- 本机探针Agent：$(status_label "$role_agent") Agent角色  ${komari_agent_status} Agent服务"
+  echo "- 本机探针主站：$(status_label "$role_komari_server") 主站角色  ${komari_server_status} 主站服务"
   echo
 }
 
@@ -887,6 +892,21 @@ api_base_from_panel_url() {
   printf "%s/panel/api" "$url"
 }
 
+url_origin_from_url() {
+  local url="$1" origin
+  origin="${url#*://}"
+  origin="${origin%%/*}"
+  printf "%s://%s" "${url%%://*}" "$origin"
+}
+
+api_base_candidates() {
+  local with_path origin
+  with_path="$(api_base_from_panel_url)"
+  origin="$(url_origin_from_url "$PANEL_URL")/panel/api"
+  echo "$with_path"
+  [[ "$origin" != "$with_path" ]] && echo "$origin"
+}
+
 node_base_path_from_url() {
   local url="$1" path
   path="/$(printf "%s" "$url" | sed -E 's|^[a-zA-Z]+://[^/]+/?||')"
@@ -911,18 +931,39 @@ is_local_master_panel() {
 
 xui_api() {
   local method="$1" path="$2" data="${3:-}"
-  local api_base
-  api_base="$(api_base_from_panel_url)"
-  if [[ -n "$data" ]]; then
-    curl -kfsS -X "$method" "${api_base}${path}" \
-      -H "Authorization: Bearer $PANEL_API_TOKEN" \
-      -H "Content-Type: application/json" \
-      --data "$data"
-  else
-    curl -kfsS -X "$method" "${api_base}${path}" \
-      -H "Authorization: Bearer $PANEL_API_TOKEN" \
-      -H "Content-Type: application/json"
-  fi
+  local api_base response body status tried="" best_status="" best_body=""
+  while IFS= read -r api_base; do
+    tried="${tried}- ${api_base}${path}"$'\n'
+    if [[ -n "$data" ]]; then
+      response="$(curl -ksS -X "$method" "${api_base}${path}" \
+        -H "Authorization: Bearer $PANEL_API_TOKEN" \
+        -H "Content-Type: application/json" \
+        -H "X-Requested-With: XMLHttpRequest" \
+        --data "$data" \
+        -w $'\n%{http_code}' 2>/dev/null || true)"
+    else
+      response="$(curl -ksS -X "$method" "${api_base}${path}" \
+        -H "Authorization: Bearer $PANEL_API_TOKEN" \
+        -H "Content-Type: application/json" \
+        -H "X-Requested-With: XMLHttpRequest" \
+        -w $'\n%{http_code}' 2>/dev/null || true)"
+    fi
+    status="$(printf "%s" "$response" | tail -n 1)"
+    body="$(printf "%s" "$response" | sed '$d')"
+    if [[ -z "$best_status" || "$best_status" == "404" || "$status" == "401" ]]; then
+      best_status="$status"
+      best_body="$body"
+    fi
+    if [[ "$status" =~ ^2[0-9][0-9]$ ]]; then
+      printf "%s" "$body"
+      return 0
+    fi
+  done < <(api_base_candidates)
+  echo "主控 API 返回 HTTP ${best_status:-unknown}。" >&2
+  [[ -n "$best_body" ]] && echo "主控返回：$(printf "%s" "$best_body" | tr '\n' ' ' | head -c 160)" >&2
+  echo "已尝试地址：" >&2
+  printf "%s" "$tried" >&2
+  return 1
 }
 
 build_node_payload() {
