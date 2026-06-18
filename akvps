@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.60-mvp"
+AKVPS_VERSION="0.1.61-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -703,20 +703,25 @@ prompt_node() {
 prompt_protocols() {
   info "协议准备"
   if [[ -n "$NODE_PROTOCOLS" ]]; then
-    local proto
+    local proto normalized item
     proto="$(lower_text "$NODE_PROTOCOLS")"
+    normalized="$(printf "%s" "$proto" | sed 's#[/,+;|，、；]# #g')"
     SELECT_VLESS=0
     SELECT_HY2=0
     SELECT_HY2_HOP=0
-    [[ "$proto" == *"vless"* ]] && SELECT_VLESS=1
-    if [[ "$proto" == *"跳跃"* || "$proto" == *"hop"* ]]; then
-      SELECT_HY2_HOP=1
-    fi
-    if [[ "$proto" == *"hy2"* || "$proto" == *"hysteria"* ]]; then
-      if [[ "$SELECT_HY2_HOP" -eq 0 || "$proto" == *"/ hy2"* || "$proto" == *"hy2 /"* || "$proto" == *",hy2"* || "$proto" == *"hy2,"* || "$proto" == *" hy2 "* ]]; then
-        SELECT_HY2=1
-      fi
-    fi
+    for item in $normalized; do
+      case "$item" in
+        vless)
+          SELECT_VLESS=1
+          ;;
+        hy2|hysteria|hysteria2)
+          SELECT_HY2=1
+          ;;
+        hy2端口跳跃|hy2跳跃|hysteria端口跳跃|hysteria跳跃|hysteria2端口跳跃|hysteria2跳跃|hy2-hop|hy2hop|hysteria-hop|hysteria2-hop|hop)
+          SELECT_HY2_HOP=1
+          ;;
+      esac
+    done
     [[ "$SELECT_VLESS" -eq 1 || "$SELECT_HY2" -eq 1 || "$SELECT_HY2_HOP" -eq 1 ]] || die "节点协议无法识别：$NODE_PROTOCOLS" "请填写 vless、hy2 或 hy2端口跳跃。"
     echo "节点协议：$(protocol_text)"
     return
@@ -2478,15 +2483,21 @@ self_check_inbounds() {
 }
 
 self_check_protocols() {
+  NODE_PROTOCOLS="vless / hy2端口跳跃"
+  prompt_protocols >/dev/null
+  [[ "$SELECT_VLESS" -eq 1 && "$SELECT_HY2" -eq 0 && "$SELECT_HY2_HOP" -eq 1 ]]
   NODE_PROTOCOLS="hy2端口跳跃"
   prompt_protocols >/dev/null
-  [[ "$SELECT_HY2" -eq 0 && "$SELECT_HY2_HOP" -eq 1 ]]
+  [[ "$SELECT_VLESS" -eq 0 && "$SELECT_HY2" -eq 0 && "$SELECT_HY2_HOP" -eq 1 ]]
   NODE_PROTOCOLS="hy2"
   prompt_protocols >/dev/null
-  [[ "$SELECT_HY2" -eq 1 && "$SELECT_HY2_HOP" -eq 0 ]]
+  [[ "$SELECT_VLESS" -eq 0 && "$SELECT_HY2" -eq 1 && "$SELECT_HY2_HOP" -eq 0 ]]
   NODE_PROTOCOLS="hy2 / hy2端口跳跃"
   prompt_protocols >/dev/null
-  [[ "$SELECT_HY2" -eq 1 && "$SELECT_HY2_HOP" -eq 1 ]]
+  [[ "$SELECT_VLESS" -eq 0 && "$SELECT_HY2" -eq 1 && "$SELECT_HY2_HOP" -eq 1 ]]
+  NODE_PROTOCOLS="vless / hy2 / hy2端口跳跃"
+  prompt_protocols >/dev/null
+  [[ "$SELECT_VLESS" -eq 1 && "$SELECT_HY2" -eq 1 && "$SELECT_HY2_HOP" -eq 1 ]]
   NODE_PROTOCOLS=""
   echo "协议解析自检通过。"
 }
