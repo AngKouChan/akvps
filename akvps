@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.24-mvp"
+AKVPS_VERSION="0.1.25-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -623,6 +623,7 @@ uninstall_akvps() {
   info "卸载脚本"
   rm -f /usr/local/bin/akvps
   echo "akvps 已卸载。3x-ui、Komari 和系统配置不会被删除。"
+  exit 0
 }
 
 clear_akvps_settings() {
@@ -1655,7 +1656,7 @@ updates_menu() {
       2) update_xui; pause_menu ;;
       3) update_komari_agent; pause_menu ;;
       4) clear_akvps_settings; pause_menu ;;
-      5) uninstall_akvps; pause_menu ;;
+      5) uninstall_akvps ;;
       6) version; pause_menu ;;
       0) return ;;
     esac
