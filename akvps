@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.100-mvp"
+AKVPS_VERSION="0.1.101-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1140,6 +1140,7 @@ prompt_tuning() {
 apply_tuning() {
   info "应用系统调优"
   [[ -f "$AKVPS_SYSCTL" ]] && cp -a "$AKVPS_SYSCTL" "$AKVPS_SYSCTL.bak.$(date +%F-%H%M%S)"
+  sed -i '/^net\.ipv4\.tcp_adv_win_scale[[:space:]]*=/d' "$AKVPS_SYSCTL" "$AKVPS_SYSCTL".bak.* 2>/dev/null || true
   local mem_kb mem_mb tcp_mem udp_mem rmem_max wmem_max somaxconn backlog syn_backlog notsent_lowat
   if [[ -r /proc/meminfo ]]; then
     mem_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
@@ -4034,6 +4035,8 @@ self_check_tuning() {
 exit 0
 EOF
   chmod +x "$tmp_dir/sysctl"
+  printf '%s\n' 'net.ipv4.tcp_adv_win_scale=6' >"$AKVPS_SYSCTL"
+  printf '%s\n' 'net.ipv4.tcp_adv_win_scale=6' >"$AKVPS_SYSCTL.bak.old"
   TUNING_MODE="advanced"
   VPS_MBPS=2000
   RTT_MS=140
@@ -4046,6 +4049,7 @@ EOF
   [[ "$content" == *"net.ipv4.tcp_max_syn_backlog=12000"* ]]
   [[ "$content" == *"net.ipv4.tcp_notsent_lowat=4096"* ]]
   [[ "$content" != *"net.ipv4.tcp_adv_win_scale"* ]]
+  [[ "$(cat "$AKVPS_SYSCTL.bak.old")" != *"net.ipv4.tcp_adv_win_scale"* ]]
   [[ "$content" != *"kernel.panic"* ]]
   [[ "$content" != *"vm.panic_on_oom"* ]]
   [[ "$content" != *"kernel.sysrq"* ]]
