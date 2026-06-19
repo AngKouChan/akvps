@@ -9,13 +9,13 @@
 固定提交：
 
 ```text
-a160da346bb4238a96133d35609d75dfec738794
+c18daa4b40b3715093567371aabbcf22122a2bb0
 ```
 
 安装命令：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/AngKouChan/akvps/a160da346bb4238a96133d35609d75dfec738794/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/AngKouChan/akvps/c18daa4b40b3715093567371aabbcf22122a2bb0/install.sh)
 ```
 
 注意：不要使用 `main` raw 地址测试。当前 GitHub raw 的 `main` 仍可能缓存旧版。
