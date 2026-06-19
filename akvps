@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.103-mvp"
+AKVPS_VERSION="0.1.104-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -3307,7 +3307,7 @@ VPS_MBPS=1000
 KOMARI_SERVER_DOMAIN=${KOMARI_SERVER_DOMAIN}
 KOMARI_ENDPOINT=${KOMARI_ENDPOINT}
 KOMARI_AUTO_DISCOVERY_KEY=${KOMARI_AUTO_DISCOVERY_KEY}
-KOMARI_MONTH_ROTATE=${KOMARI_MONTH_ROTATE:-1}
+KOMARI_MONTH_ROTATE=${KOMARI_MONTH_ROTATE}
 END
 EOF
 }
@@ -3451,12 +3451,10 @@ prompt_komari() {
   if [[ -n "$KOMARI_MONTH_ROTATE" ]]; then
     [[ "$KOMARI_MONTH_ROTATE" =~ ^([0-9]|[12][0-9]|3[01])$ ]] || die "网络统计月重置日格式不正确。" "请填写 0 到 31。"
     echo "网络统计月重置日：$KOMARI_MONTH_ROTATE"
-  elif [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
-    KOMARI_MONTH_ROTATE="7"
-    echo "网络统计月重置日：7（默认）"
   else
     while true; do
-      read -r -p "请输入网络统计月重置日，0=禁用，1-31=每月日期: " KOMARI_MONTH_ROTATE
+      read -r -p "请输入网络统计月重置日，0=禁用，1-31=每月日期 [0]: " KOMARI_MONTH_ROTATE
+      KOMARI_MONTH_ROTATE="${KOMARI_MONTH_ROTATE:-0}"
       if [[ "$KOMARI_MONTH_ROTATE" =~ ^([0-9]|[12][0-9]|3[01])$ ]]; then
         break
       fi
@@ -4121,6 +4119,38 @@ EOF
   echo "软件安装修复自检通过。"
 }
 
+self_check_komari_month_rotate() {
+  local tmp_dir old_config old_secrets old_endpoint old_rotate old_key old_auto out
+  tmp_dir="$(mktemp -d)"
+  old_config="$AKVPS_CONFIG"
+  old_secrets="$AKVPS_SECRETS"
+  old_endpoint="$KOMARI_ENDPOINT"
+  old_rotate="$KOMARI_MONTH_ROTATE"
+  old_key="$KOMARI_AUTO_DISCOVERY_KEY"
+  old_auto="$AKVPS_AUTO_DEPLOY"
+  AKVPS_CONFIG="$tmp_dir/config.env"
+  AKVPS_SECRETS="$tmp_dir/secrets.env"
+  KOMARI_ENDPOINT="https://status.example.com"
+  KOMARI_AUTO_DISCOVERY_KEY="komari-secret"
+  KOMARI_MONTH_ROTATE=""
+  AKVPS_AUTO_DEPLOY=1
+  out="$(print_node_import_template "1.2.3.4" "" "x.example.com" "https://x.example.com/path" "panel-token")"
+  [[ "$out" == *"KOMARI_MONTH_ROTATE="* ]]
+  [[ "$out" != *"KOMARI_MONTH_ROTATE=1"* ]]
+  [[ "$out" != *"KOMARI_MONTH_ROTATE=7"* ]]
+  prompt_komari <<<"" >/dev/null
+  [[ "$KOMARI_MONTH_ROTATE" == "0" ]]
+  grep -q '^KOMARI_MONTH_ROTATE=0$' "$AKVPS_CONFIG"
+  AKVPS_CONFIG="$old_config"
+  AKVPS_SECRETS="$old_secrets"
+  KOMARI_ENDPOINT="$old_endpoint"
+  KOMARI_MONTH_ROTATE="$old_rotate"
+  KOMARI_AUTO_DISCOVERY_KEY="$old_key"
+  AKVPS_AUTO_DEPLOY="$old_auto"
+  rm -rf "$tmp_dir"
+  echo "Komari 月重置日自检通过。"
+}
+
 initial_setup() {
   node_deploy
 }
@@ -4504,6 +4534,7 @@ case "${1:-menu}" in
   check-redaction|self-check-redaction) self_check_redaction ;;
   check-tuning|self-check-tuning) self_check_tuning ;;
   check-package-repair|self-check-package-repair) self_check_package_repair ;;
+  check-komari-month-rotate|self-check-komari-month-rotate) self_check_komari_month_rotate ;;
   menu) main_menu ;;
   one-click|one-click-deploy) one_click_deploy ;;
   init|initial-setup|node|node-deploy) node_deploy ;;

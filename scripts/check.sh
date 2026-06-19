@@ -35,4 +35,7 @@ bash akvps check-tuning >/dev/null
 echo "检查软件安装修复..."
 bash akvps check-package-repair >/dev/null
 
+echo "检查 Komari 月重置日..."
+bash akvps check-komari-month-rotate >/dev/null
+
 echo "检查完成。"
