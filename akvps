@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.98-mvp"
+AKVPS_VERSION="0.1.99-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -249,11 +249,17 @@ mask_secret() {
 }
 
 redact_stream() {
-  sed -E \
+  awk '
+    /-----BEGIN CERTIFICATE-----/ {in_cert=1; print "-----BEGIN CERTIFICATE-----"; print "***已隐藏证书正文***"; next}
+    /-----END CERTIFICATE-----/ {in_cert=0; print "-----END CERTIFICATE-----"; next}
+    in_cert {next}
+    {print}
+  ' | sed -E \
     -e 's/(Password:[[:space:]]+).+/\1***已隐藏***/I' \
     -e 's/(Username:[[:space:]]+).+/\1***已隐藏***/I' \
     -e 's/(API Token:[[:space:]]+).+/\1***已隐藏***/I' \
-    -e 's/(Access URL:[[:space:]]+).+/\1***已隐藏***/I'
+    -e 's/(Access URL:[[:space:]]+).+/\1***已隐藏***/I' \
+    -e 's/(WebBasePath:[[:space:]]+).+/\1***已隐藏***/I'
 }
 
 print_redacted_report() {
@@ -629,13 +635,19 @@ client_email_for_kind() {
 }
 
 tuning_status_text() {
-  local bbr qdisc
+  local bbr qdisc mode
   bbr="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
   qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || echo unknown)"
+  mode="$TUNING_MODE"
+  case "$mode" in
+    advanced) mode="进阶" ;;
+    basic) mode="基础" ;;
+    *) mode="稳妥" ;;
+  esac
   if [[ "$bbr" == "bbr" && "$qdisc" == "fq" ]]; then
-    echo "BBR+FQ"
+    echo "BBR+FQ（${mode}）"
   else
-    echo "${bbr}/${qdisc}"
+    echo "${bbr}/${qdisc}（${mode}）"
   fi
 }
 
@@ -1107,6 +1119,7 @@ prompt_tuning() {
     3) TUNING_MODE="basic" ;;
     *) TUNING_MODE="smart" ;;
   esac
+  save_config_var "TUNING_MODE" "$TUNING_MODE"
   [[ "$TUNING_MODE" == "basic" ]] && return
   read -r -p "VPS 标称 Mbps [1000]: " v
   VPS_MBPS="${v:-1000}"
@@ -1119,6 +1132,9 @@ prompt_tuning() {
   echo "3. 丢包明显"
   read -r -p "请选择 [1]: " LINE_QUALITY
   LINE_QUALITY="${LINE_QUALITY:-1}"
+  save_config_var "VPS_MBPS" "$VPS_MBPS"
+  save_config_var "RTT_MS" "$RTT_MS"
+  save_config_var "LINE_QUALITY" "$LINE_QUALITY"
 }
 
 apply_tuning() {
@@ -3996,11 +4012,13 @@ EOF
   [[ "$out" != *"cloudflare-secret"* ]]
   [[ "$out" != *"komari-secret"* ]]
   [[ "$out" == *"***已隐藏***"* ]]
-  out="$(printf 'Username: alice\nPassword: pass123\nAPI Token: token123\nAccess URL: https://secret.example/path\n' | redact_stream)"
+  out="$(printf 'Username: alice\nPassword: pass123\nAPI Token: token123\nAccess URL: https://secret.example/path\nWebBasePath: secret-path\n-----BEGIN CERTIFICATE-----\nsecret-cert-body\n-----END CERTIFICATE-----\n' | redact_stream)"
   [[ "$out" != *"alice"* ]]
   [[ "$out" != *"pass123"* ]]
   [[ "$out" != *"token123"* ]]
   [[ "$out" != *"secret.example"* ]]
+  [[ "$out" != *"secret-path"* ]]
+  [[ "$out" != *"secret-cert-body"* ]]
   echo "敏感输出遮挡自检通过。"
 }
 
@@ -4035,6 +4053,7 @@ EOF
   [[ "$content" != *"kernel.panic"* ]]
   [[ "$content" != *"vm.panic_on_oom"* ]]
   [[ "$content" != *"kernel.sysrq"* ]]
+  [[ "$(tuning_status_text)" == *"进阶"* ]]
   AKVPS_SYSCTL="$old_sysctl_path"
   TUNING_MODE="$old_tuning"
   VPS_MBPS="$old_vps"
