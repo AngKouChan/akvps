@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.89-mvp"
+AKVPS_VERSION="0.1.90-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -13,6 +13,8 @@ AKVPS_LATEST_KOMARI_REPORT="/var/lib/akvps/latest-komari-report.md"
 AKVPS_LATEST_KOMARI_SERVER_REPORT="/var/lib/akvps/latest-komari-server-report.md"
 AKVPS_SYSCTL="/etc/sysctl.d/99-akvps.conf"
 AKVPS_SSHD_CONF="/etc/ssh/sshd_config.d/99-akvps-key-only.conf"
+AKVPS_HY2_HOP_REDIRECT="/usr/local/sbin/akvps-hy2-hop-redirect"
+AKVPS_HY2_HOP_SERVICE="/etc/systemd/system/akvps-hy2-hop.service"
 AKVPS_ROOT_DOMAIN="kouzho.cc"
 AKVPS_XUI_PORT="11123"
 AKVPS_PANEL_PORT="11123"
@@ -801,7 +803,7 @@ prompt_protocols() {
 install_base_tools() {
   info "安装必要工具"
   apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -q curl ca-certificates ufw jq unzip tar cron openssl sqlite3 iproute2 libc-bin
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -q curl ca-certificates ufw jq unzip tar cron openssl sqlite3 iproute2 iptables libc-bin
   timedatectl set-timezone Asia/Shanghai || true
 }
 
@@ -1114,6 +1116,49 @@ setup_ufw() {
   [[ "$SELECT_HY2_HOP" -eq 1 ]] && ufw allow "$AKVPS_HY2_HOP_START:$AKVPS_HY2_HOP_END/udp" comment "hysteria2 hop"
   ufw --force enable
   ufw reload
+  [[ "$SELECT_HY2_HOP" -eq 1 ]] && setup_hy2_hop_redirect
+}
+
+setup_hy2_hop_redirect() {
+  info "配置 HY2 端口跳跃转发"
+  command -v iptables >/dev/null 2>&1 || {
+    echo "跳过 HY2 端口跳跃转发：未找到 iptables。"
+    return 1
+  }
+  install -d -m 755 "$(dirname "$AKVPS_HY2_HOP_REDIRECT")"
+  cat >"$AKVPS_HY2_HOP_REDIRECT" <<EOF
+#!/usr/bin/env sh
+set -eu
+if ! command -v iptables >/dev/null 2>&1; then
+  exit 0
+fi
+iptables -t nat -C PREROUTING -p udp --dport ${AKVPS_HY2_HOP_START}:${AKVPS_HY2_HOP_END} -j REDIRECT --to-ports ${AKVPS_HY2_HOP_START} 2>/dev/null || \\
+iptables -t nat -A PREROUTING -p udp --dport ${AKVPS_HY2_HOP_START}:${AKVPS_HY2_HOP_END} -j REDIRECT --to-ports ${AKVPS_HY2_HOP_START}
+EOF
+  chmod 0755 "$AKVPS_HY2_HOP_REDIRECT"
+  "$AKVPS_HY2_HOP_REDIRECT" || {
+    echo "HY2 端口跳跃转发配置失败。"
+    return 1
+  }
+  if command -v systemctl >/dev/null 2>&1; then
+    cat >"$AKVPS_HY2_HOP_SERVICE" <<EOF
+[Unit]
+Description=akvps Hysteria2 UDP port hopping redirect
+After=network-online.target ufw.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${AKVPS_HY2_HOP_REDIRECT}
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now "$(basename "$AKVPS_HY2_HOP_SERVICE")" >/dev/null 2>&1 || true
+  fi
+  echo "HY2 端口跳跃转发已配置：${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}/udp -> ${AKVPS_HY2_HOP_START}/udp"
 }
 
 setup_panel_ufw() {
