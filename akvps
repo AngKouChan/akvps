@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.91-mvp"
+AKVPS_VERSION="0.1.92-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1132,7 +1132,12 @@ set -eu
 if ! command -v iptables >/dev/null 2>&1; then
   exit 0
 fi
-iptables -t nat -C PREROUTING -p udp --dport ${AKVPS_HY2_HOP_START}:${AKVPS_HY2_HOP_END} -j REDIRECT --to-ports ${AKVPS_HY2_PORT} 2>/dev/null || \\
+while iptables -t nat -C PREROUTING -p udp --dport ${AKVPS_HY2_HOP_START}:${AKVPS_HY2_HOP_END} -j REDIRECT --to-ports ${AKVPS_HY2_HOP_START} 2>/dev/null; do
+  iptables -t nat -D PREROUTING -p udp --dport ${AKVPS_HY2_HOP_START}:${AKVPS_HY2_HOP_END} -j REDIRECT --to-ports ${AKVPS_HY2_HOP_START}
+done
+while iptables -t nat -C PREROUTING -p udp --dport ${AKVPS_HY2_HOP_START}:${AKVPS_HY2_HOP_END} -j REDIRECT --to-ports ${AKVPS_HY2_PORT} 2>/dev/null; do
+  iptables -t nat -D PREROUTING -p udp --dport ${AKVPS_HY2_HOP_START}:${AKVPS_HY2_HOP_END} -j REDIRECT --to-ports ${AKVPS_HY2_PORT}
+done
 iptables -t nat -A PREROUTING -p udp --dport ${AKVPS_HY2_HOP_START}:${AKVPS_HY2_HOP_END} -j REDIRECT --to-ports ${AKVPS_HY2_PORT}
 EOF
   chmod 0755 "$AKVPS_HY2_HOP_REDIRECT"
