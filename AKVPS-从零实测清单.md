@@ -4,18 +4,18 @@
 
 ## 一、测试版本
 
-当前测试固定版：`0.1.103-mvp`
+当前测试固定版：`0.1.104-mvp`
 
 固定提交：
 
 ```text
-9595f5e12f3dcc152e45fbdcc973ba86b25c006e
+b5bad092baf203b36d3df722a52dc90136139cfa
 ```
 
 安装命令：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/AngKouChan/akvps/9595f5e12f3dcc152e45fbdcc973ba86b25c006e/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/AngKouChan/akvps/b5bad092baf203b36d3df722a52dc90136139cfa/install.sh)
 ```
 
 注意：不要使用 `main` raw 地址测试。当前 GitHub raw 的 `main` 仍可能缓存旧版。
