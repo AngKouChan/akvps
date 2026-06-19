@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.88-mvp"
+AKVPS_VERSION="0.1.89-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1199,8 +1199,8 @@ resolve_ipv4_public() {
 
 wait_dns_for_domain() {
   local domain="$1"
-  local i second resolved="" total_attempts=30 interval=10 remaining
-  for i in $(seq 1 "$total_attempts"); do
+  local second resolved="" max_wait=60
+  for second in $(seq 1 "$max_wait"); do
     resolved="$(resolve_ipv4_public "$domain")"
     [[ -n "$resolved" ]] || resolved="$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ' || true)"
     if [[ " $resolved " == *" $PUBLIC_IPV4 "* ]]; then
@@ -1208,11 +1208,8 @@ wait_dns_for_domain() {
       echo "DNS 已生效：$domain -> $PUBLIC_IPV4"
       return 0
     fi
-    for second in $(seq "$interval" -1 1); do
-      remaining=$(( (total_attempts - i) * interval + second ))
-      printf "\r等待 DNS 生效中... 剩余约 %3d 秒" "$remaining"
-      sleep 1
-    done
+    printf "\r等待 DNS 生效中... %2d/%d 秒" "$second" "$max_wait"
+    sleep 1
   done
   printf "\r%*s\r" 80 ""
   die "DNS 暂未解析到当前 VPS IPv4。" "请稍后重新运行 akvps，或检查 Cloudflare DNS。"
@@ -2164,10 +2161,12 @@ port_listening() {
 
 wait_for_port_listening() {
   local port="$1" proto="${2:-tcp}" i
-  for i in $(seq 1 10); do
+  for i in $(seq 1 60); do
     port_listening "$port" "$proto" && return 0
+    printf "\r等待节点端口监听... %2d/%d 秒" "$i" 60
     sleep 1
   done
+  printf "\r%*s\r" 80 ""
   return 1
 }
 
@@ -2207,9 +2206,15 @@ sync_inbound_to_local_node() {
     echo "${action}节点本机入站：$tag"
     proto="$(inbound_proto_for_kind "$kind")"
     wait_for_port_listening "$port" "$proto" || {
+      if [[ "$kind" == "hy2hop" ]]; then
+        echo "节点本机入站已保存，但暂未看到端口监听：${port}/${proto}"
+        echo "提示：Hysteria2 端口跳跃以客户端实测和主控流量回传为准，先继续后续流程。"
+        return 0
+      fi
       echo "节点本机入站已保存，但端口未监听：${port}/${proto}"
       return 1
     }
+    printf "\r%*s\r" 80 ""
     echo "节点本机端口已监听：${port}/${proto}"
     return 0
   fi
@@ -2785,9 +2790,9 @@ ensure_master_inbounds() {
 }
 
 verify_master_node_runtime() {
-  local payload response status xray_state msg i
+  local payload response status xray_state msg second max_wait=60
   payload="$(node_tls_payload)"
-  for i in $(seq 1 6); do
+  for second in $(seq 1 "$max_wait"); do
     response="$(xui_api POST "/nodes/test" "$payload")" || return 1
     status="$(printf "%s" "$response" | jq -r '.obj.status // empty')"
     xray_state="$(printf "%s" "$response" | jq -r '.obj.xrayState // .obj.xray.state // empty')"
@@ -2796,9 +2801,10 @@ verify_master_node_runtime() {
       echo "验证通过：远端节点在线，Xray 状态正常。"
       return 0
     fi
-    echo "等待远端节点同步配置... $i/6"
-    sleep 5
+    printf "\r等待远端节点同步配置... %2d/%d 秒" "$second" "$max_wait"
+    sleep 1
   done
+  printf "\r%*s\r" 80 ""
   echo "远端节点同步后仍未确认正常：${msg:-unknown}"
   return 1
 }
@@ -2813,17 +2819,18 @@ connect_node_to_master() {
   [[ -n "$NODE_NAME" && -n "$NODE_DOMAIN" && -n "$NODE_XUI_API_TOKEN" ]] || die "缺少当前节点信息。" "请先运行 2. 本机部署 -> 1. 代理节点。"
 
   info "测试节点连通"
-  local payload response status xray_state msg i
+  local payload response status xray_state msg second max_wait=60
   payload="$(node_tls_payload)"
-  for i in $(seq 1 12); do
+  for second in $(seq 1 "$max_wait"); do
     response="$(xui_api POST "/nodes/test" "$payload")" || die "无法连接主控面板 API。" "如果上面显示 HTTP 401/403，请重新导入主控机卡片里的完整 PANEL_API_TOKEN。"
     status="$(printf "%s" "$response" | jq -r '.obj.status // empty')"
     xray_state="$(printf "%s" "$response" | jq -r '.obj.xrayState // .obj.xray.state // empty')"
     msg="$(printf "%s" "$response" | jq -r '.obj.error // .obj.xrayError // .obj.xray.errorMsg // .msg // empty')"
     [[ "$status" == "online" && "$xray_state" != "failed" && "$xray_state" != "error" ]] && break
-    echo "节点暂未就绪，等待重试... $i/12"
-    sleep 5
+    printf "\r节点暂未就绪，等待重试... %2d/%d 秒" "$second" "$max_wait"
+    sleep 1
   done
+  printf "\r%*s\r" 80 ""
   [[ "$status" == "online" && "$xray_state" != "failed" && "$xray_state" != "error" ]] || die "主控未确认节点和 Xray 正常。" "请检查节点域名、11123 端口、节点 API Token、Xray 状态。主控返回：${msg:-unknown}"
   payload="$(node_tls_payload)"
 
@@ -3363,7 +3370,7 @@ install_komari_server() {
 
 setup_komari_caddy() {
   info "配置 Komari HTTPS"
-  local i
+  local second max_wait=60
   mkdir -p /etc/caddy
   cat > /etc/caddy/Caddyfile <<EOF
 ${KOMARI_SERVER_DOMAIN} {
@@ -3373,14 +3380,16 @@ EOF
   caddy validate --config /etc/caddy/Caddyfile >/dev/null
   systemctl enable caddy >/dev/null 2>&1 || true
   systemctl restart caddy
-  for i in $(seq 1 24); do
+  for second in $(seq 1 "$max_wait"); do
     if curl -fsS --max-time 10 "https://${KOMARI_SERVER_DOMAIN}" >/dev/null 2>&1; then
+      printf "\r%*s\r" 80 ""
       echo "Komari HTTPS 已生效：https://${KOMARI_SERVER_DOMAIN}"
       return 0
     fi
-    echo "等待 HTTPS 生效中... $i/24"
-    sleep 5
+    printf "\r等待 HTTPS 生效中... %2d/%d 秒" "$second" "$max_wait"
+    sleep 1
   done
+  printf "\r%*s\r" 80 ""
   die "Komari HTTPS 暂未成功。" "请稍后访问 https://${KOMARI_SERVER_DOMAIN}，或查看 journalctl -u caddy -n 80。"
 }
 
