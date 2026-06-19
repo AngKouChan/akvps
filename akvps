@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.92-mvp"
+AKVPS_VERSION="0.1.93-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -720,6 +720,30 @@ port_in_use() {
   ss -lntu 2>/dev/null | awk -v p=":${port}$" -v proto="$proto" 'tolower($1) ~ proto && $5 ~ p {found=1} END{exit found?0:1}'
 }
 
+port_listener_lines() {
+  local port="$1" proto="${2:-tcp}"
+  if [[ "$proto" == "udp" ]]; then
+    ss -H -lnup 2>/dev/null | awk -v p="$port" '$5 ~ "[:.]" p "$" {print}'
+  else
+    ss -H -lntp 2>/dev/null | awk -v p="$port" '$4 ~ "[:.]" p "$" {print}'
+  fi
+}
+
+port_in_use_by_xui() {
+  local port="$1" proto="${2:-tcp}"
+  port_listener_lines "$port" "$proto" | grep -Eqi '(x-ui|xray)'
+}
+
+udp_range_listener_lines() {
+  local start="$1" end="$2"
+  ss -H -lnup 2>/dev/null | awk -v start="$start" -v end="$end" '
+    {
+      port=$5
+      sub(/^.*[:.]/, "", port)
+      if (port ~ /^[0-9]+$/ && port >= start && port <= end) print
+    }'
+}
+
 detect_ssh_port() {
   local port=""
   port="$(sshd -T 2>/dev/null | awk '/^port / {print $2; exit}' || true)"
@@ -729,22 +753,46 @@ detect_ssh_port() {
   printf "%s" "${port:-22}"
 }
 
+check_service_port() {
+  local port="$1" proto="$2" label="$3" purpose="$4" allow_xui="${5:-0}"
+  if ! port_in_use "$port" "$proto"; then
+    echo "- ${purpose}：${label} 可用"
+    return 0
+  fi
+  if [[ "$allow_xui" == "1" ]] && port_in_use_by_xui "$port" "$proto"; then
+    echo "- ${purpose}：${label} 已被 3x-ui / Xray 使用，将复用或更新"
+    return 0
+  fi
+  if [[ "$port" == "$AKVPS_XUI_PORT" && -x "$XUI_BIN" ]]; then
+    echo "- ${purpose}：${label} 检测到已有 3x-ui，将复用"
+    return 0
+  fi
+  die "端口 $label 已被占用。" "用途：${purpose}。请先释放端口，再重新运行 akvps。"
+}
+
+check_hy2_hop_range() {
+  local label="${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}/udp" lines conflicts stale
+  lines="$(udp_range_listener_lines "$AKVPS_HY2_HOP_START" "$AKVPS_HY2_HOP_END" || true)"
+  [[ -n "$lines" ]] || {
+    echo "- HY2 端口跳跃范围：${label} 可用"
+    return 0
+  }
+  conflicts="$(printf "%s\n" "$lines" | grep -Evi '(x-ui|xray)' || true)"
+  stale="$(printf "%s\n" "$lines" | grep -Ei '(x-ui|xray)' || true)"
+  if [[ -n "$conflicts" ]]; then
+    die "HY2 端口跳跃范围 $label 已被其他程序占用。" "请先释放这些 UDP 端口；否则跳跃转发会影响其他服务。"
+  fi
+  if [[ -n "$stale" ]]; then
+    echo "- HY2 端口跳跃范围：${label} 检测到旧 3x-ui / Xray 监听，将在本次部署中改回 ${AKVPS_HY2_PORT}/udp"
+  fi
+}
+
 check_ports() {
-  local entries=("${AKVPS_XUI_PORT}:tcp")
-  [[ "$SELECT_VLESS" -eq 1 ]] && entries+=("${AKVPS_VLESS_PORT}:tcp")
-  [[ "$SELECT_HY2" -eq 1 || "$SELECT_HY2_HOP" -eq 1 ]] && entries+=("${AKVPS_HY2_PORT}:udp")
-  [[ "$SELECT_HY2_HOP" -eq 1 ]] && entries+=("${AKVPS_HY2_HOP_START}:udp")
-  local entry p proto label
-  for entry in "${entries[@]}"; do
-    p="${entry%%:*}"
-    proto="${entry##*:}"
-    label="${p}/${proto}"
-    [[ "$SELECT_HY2_HOP" -eq 1 && "$p" == "$AKVPS_HY2_HOP_START" ]] && label="${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}/${proto}"
-    if port_in_use "$p" "$proto"; then
-      [[ "$p" == "$AKVPS_XUI_PORT" && -x "$XUI_BIN" ]] && continue
-      die "端口 $label 已被占用。" "请先释放端口，再重新运行 akvps。"
-    fi
-  done
+  info "端口用途预检"
+  check_service_port "$AKVPS_XUI_PORT" tcp "${AKVPS_XUI_PORT}/tcp" "3x-ui 被控端面板" 1
+  [[ "$SELECT_VLESS" -eq 1 ]] && check_service_port "$AKVPS_VLESS_PORT" tcp "${AKVPS_VLESS_PORT}/tcp" "VLESS Reality" 1
+  [[ "$SELECT_HY2" -eq 1 || "$SELECT_HY2_HOP" -eq 1 ]] && check_service_port "$AKVPS_HY2_PORT" udp "${AKVPS_HY2_PORT}/udp" "Hysteria2 服务端口" 1
+  [[ "$SELECT_HY2_HOP" -eq 1 ]] && check_hy2_hop_range
 }
 
 prompt_node() {
