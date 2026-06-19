@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.96-mvp"
+AKVPS_VERSION="0.1.97-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -250,6 +250,27 @@ mask_secret() {
   else
     echo "${value:0:6}...${value: -4}"
   fi
+}
+
+redact_stream() {
+  sed -E \
+    -e 's/(Password:[[:space:]]+).+/\1***已隐藏***/I' \
+    -e 's/(Username:[[:space:]]+).+/\1***已隐藏***/I' \
+    -e 's/(API Token:[[:space:]]+).+/\1***已隐藏***/I' \
+    -e 's/(Access URL:[[:space:]]+).+/\1***已隐藏***/I'
+}
+
+print_redacted_report() {
+  local path="$1"
+  sed -E \
+    -e 's/^(\| API Token \| ).*( \|)$/\1***已隐藏***\2/' \
+    -e 's/^(\| 用户名 \| ).*( \|)$/\1***已隐藏***\2/' \
+    -e 's/^(\| 密码 \| ).*( \|)$/\1***已隐藏***\2/' \
+    -e 's/^(\| 初始密码 \| ).*( \|)$/\1***已隐藏***\2/' \
+    -e 's/^(PANEL_API_TOKEN=).+$/\1***已隐藏***/' \
+    -e 's/^(CLOUDFLARE_TOKEN=).+$/\1***已隐藏***/' \
+    -e 's/^(KOMARI_AUTO_DISCOVERY_KEY=).+$/\1***已隐藏***/' \
+    "$path"
 }
 
 prompt_config() {
@@ -3086,7 +3107,7 @@ install_or_configure_xui() {
   if [[ -x "$XUI_BIN" ]]; then
     echo "检测到已安装 3x-ui，复用现有安装。"
   else
-    bash <(curl -fsSL https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh)
+    bash <(curl -fsSL https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh) 2>&1 | redact_stream
   fi
 
   [[ -x "$XUI_BIN" ]] || die "3x-ui 安装后未找到 x-ui 命令。" "请检查官方安装脚本输出。"
@@ -3135,7 +3156,7 @@ install_or_configure_panel_xui() {
   if [[ -x "$XUI_BIN" ]]; then
     echo "检测到已安装 3x-ui，复用现有安装。"
   else
-    bash <(curl -fsSL https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh)
+    bash <(curl -fsSL https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh) 2>&1 | redact_stream
   fi
 
   [[ -x "$XUI_BIN" ]] || die "3x-ui 安装后未找到 x-ui 命令。" "请检查官方安装脚本输出。"
@@ -3287,7 +3308,8 @@ EOF
   chmod 600 "$REPORT_PATH"
   ln -sf "$REPORT_PATH" "$AKVPS_LATEST_REPORT"
   echo "报告已保存：$REPORT_PATH"
-  cat "$REPORT_PATH"
+  echo "终端仅显示遮挡版；完整凭据保存在上方 root 权限报告文件。"
+  print_redacted_report "$REPORT_PATH"
 }
 
 generate_panel_report() {
@@ -3333,7 +3355,8 @@ EOF
   chmod 600 "$PANEL_REPORT_PATH"
   ln -sf "$PANEL_REPORT_PATH" "$AKVPS_LATEST_PANEL_REPORT"
   echo "卡片已保存：$PANEL_REPORT_PATH"
-  cat "$PANEL_REPORT_PATH"
+  echo "终端仅显示遮挡版；完整凭据保存在上方 root 权限卡片文件。"
+  print_redacted_report "$PANEL_REPORT_PATH"
 }
 
 prompt_komari() {
@@ -3424,7 +3447,7 @@ EOF
   chmod 600 "$KOMARI_REPORT_PATH"
   ln -sf "$KOMARI_REPORT_PATH" "$AKVPS_LATEST_KOMARI_REPORT"
   echo "卡片已保存：$KOMARI_REPORT_PATH"
-  cat "$KOMARI_REPORT_PATH"
+  print_redacted_report "$KOMARI_REPORT_PATH"
 }
 
 prompt_komari_server() {
@@ -3544,7 +3567,8 @@ EOF
   chmod 600 "$KOMARI_SERVER_REPORT_PATH"
   ln -sf "$KOMARI_SERVER_REPORT_PATH" "$AKVPS_LATEST_KOMARI_SERVER_REPORT"
   echo "卡片已保存：$KOMARI_SERVER_REPORT_PATH"
-  cat "$KOMARI_SERVER_REPORT_PATH"
+  echo "终端仅显示遮挡版；完整凭据保存在上方 root 权限卡片文件。"
+  print_redacted_report "$KOMARI_SERVER_REPORT_PATH"
 }
 
 self_check() {
@@ -3907,6 +3931,35 @@ self_check_master_flow() {
   ' "$AKVPS_MOCK_STATE" >/dev/null
   master_inbound_option_available "$target_id"
   echo "主控一键接入链路自检通过。"
+}
+
+self_check_redaction() {
+  local tmp out
+  tmp="$(mktemp)"
+  cat >"$tmp" <<'EOF'
+| 用户名 | admin |
+| 密码 | super-secret-password |
+| 初始密码 | first-secret-password |
+| API Token | token-secret |
+PANEL_API_TOKEN=panel-secret
+CLOUDFLARE_TOKEN=cloudflare-secret
+KOMARI_AUTO_DISCOVERY_KEY=komari-secret
+EOF
+  out="$(print_redacted_report "$tmp")"
+  rm -f "$tmp"
+  [[ "$out" != *"super-secret-password"* ]]
+  [[ "$out" != *"first-secret-password"* ]]
+  [[ "$out" != *"token-secret"* ]]
+  [[ "$out" != *"panel-secret"* ]]
+  [[ "$out" != *"cloudflare-secret"* ]]
+  [[ "$out" != *"komari-secret"* ]]
+  [[ "$out" == *"***已隐藏***"* ]]
+  out="$(printf 'Username: alice\nPassword: pass123\nAPI Token: token123\nAccess URL: https://secret.example/path\n' | redact_stream)"
+  [[ "$out" != *"alice"* ]]
+  [[ "$out" != *"pass123"* ]]
+  [[ "$out" != *"token123"* ]]
+  [[ "$out" != *"secret.example"* ]]
+  echo "敏感输出遮挡自检通过。"
 }
 
 initial_setup() {
@@ -4289,6 +4342,7 @@ case "${1:-menu}" in
   check-inbounds|self-check-inbounds) self_check_inbounds ;;
   check-protocols|self-check-protocols) self_check_protocols ;;
   check-master-flow|self-check-master-flow) self_check_master_flow ;;
+  check-redaction|self-check-redaction) self_check_redaction ;;
   menu) main_menu ;;
   one-click|one-click-deploy) one_click_deploy ;;
   init|initial-setup|node|node-deploy) node_deploy ;;

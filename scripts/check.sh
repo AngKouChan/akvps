@@ -26,4 +26,7 @@ bash akvps check-protocols >/dev/null
 echo "检查主控一键接入链路..."
 bash akvps check-master-flow >/dev/null
 
+echo "检查敏感输出遮挡..."
+bash akvps check-redaction >/dev/null
+
 echo "检查完成。"
