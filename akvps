@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.95-mvp"
+AKVPS_VERSION="0.1.96-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1160,13 +1160,24 @@ setup_ufw() {
   ufw allow 80/tcp comment "acme"
   ufw allow 443/tcp comment "https"
   ufw allow from "$MASTER_IPV4" to any port "$AKVPS_XUI_PORT" proto tcp comment "akvps x-ui master"
-  [[ -n "$MASTER_IPV6" ]] && ufw allow from "$MASTER_IPV6" to any port "$AKVPS_XUI_PORT" proto tcp comment "akvps x-ui master ipv6"
-  [[ "$SELECT_VLESS" -eq 1 ]] && ufw allow "$AKVPS_VLESS_PORT/tcp" comment "vless reality"
-  [[ "$SELECT_HY2" -eq 1 || "$SELECT_HY2_HOP" -eq 1 ]] && ufw allow "$AKVPS_HY2_PORT/udp" comment "hysteria2"
-  [[ "$SELECT_HY2_HOP" -eq 1 ]] && ufw allow "$AKVPS_HY2_HOP_START:$AKVPS_HY2_HOP_END/udp" comment "hysteria2 hop"
+  if [[ -n "$MASTER_IPV6" ]]; then
+    ufw allow from "$MASTER_IPV6" to any port "$AKVPS_XUI_PORT" proto tcp comment "akvps x-ui master ipv6"
+  fi
+  if [[ "$SELECT_VLESS" -eq 1 ]]; then
+    ufw allow "$AKVPS_VLESS_PORT/tcp" comment "vless reality"
+  fi
+  if [[ "$SELECT_HY2" -eq 1 || "$SELECT_HY2_HOP" -eq 1 ]]; then
+    ufw allow "$AKVPS_HY2_PORT/udp" comment "hysteria2"
+  fi
+  if [[ "$SELECT_HY2_HOP" -eq 1 ]]; then
+    ufw allow "$AKVPS_HY2_HOP_START:$AKVPS_HY2_HOP_END/udp" comment "hysteria2 hop"
+  fi
   ufw --force enable
   ufw reload
-  [[ "$SELECT_HY2_HOP" -eq 1 ]] && setup_hy2_hop_redirect
+  if [[ "$SELECT_HY2_HOP" -eq 1 ]]; then
+    setup_hy2_hop_redirect
+  fi
+  return 0
 }
 
 setup_hy2_hop_redirect() {
@@ -1269,7 +1280,9 @@ setup_dns() {
   zone_id="$(cf_zone_id)"
   [[ -n "$zone_id" ]] || die "找不到 Cloudflare Zone：$AKVPS_ROOT_DOMAIN" "请检查 Token 权限是否包含 Zone Read 和 DNS Edit。"
   upsert_dns_record "$zone_id" "A" "$NODE_DOMAIN" "$PUBLIC_IPV4"
-  [[ -n "$PUBLIC_IPV6" ]] && upsert_dns_record "$zone_id" "AAAA" "$NODE_DOMAIN" "$PUBLIC_IPV6"
+  if [[ -n "$PUBLIC_IPV6" ]]; then
+    upsert_dns_record "$zone_id" "AAAA" "$NODE_DOMAIN" "$PUBLIC_IPV6"
+  fi
   echo "DNS 已更新：$NODE_DOMAIN"
 }
 
@@ -1280,7 +1293,9 @@ setup_dns_for_domain() {
   zone_id="$(cf_zone_id)"
   [[ -n "$zone_id" ]] || die "找不到 Cloudflare Zone：$AKVPS_ROOT_DOMAIN" "请检查 Token 权限是否包含 Zone Read 和 DNS Edit。"
   upsert_dns_record "$zone_id" "A" "$domain" "$PUBLIC_IPV4"
-  [[ -n "$PUBLIC_IPV6" ]] && upsert_dns_record "$zone_id" "AAAA" "$domain" "$PUBLIC_IPV6"
+  if [[ -n "$PUBLIC_IPV6" ]]; then
+    upsert_dns_record "$zone_id" "AAAA" "$domain" "$PUBLIC_IPV6"
+  fi
   echo "DNS 已更新：$domain"
 }
 
@@ -3680,7 +3695,7 @@ self_check_inbounds() {
 }
 
 self_check_protocols() {
-  local seen_ports
+  local seen_ports seen_ufw seen_dns
   NODE_NAME="bad / node"
   [[ "$(client_email_for_kind vless)" == "bad-node-vless" ]]
   NODE_NAME="aktest"
@@ -3731,6 +3746,31 @@ self_check_protocols() {
   [[ "$seen_ports" == *"${AKVPS_XUI_PORT}/tcp"* ]]
   [[ "$seen_ports" == *"${AKVPS_VLESS_PORT}/tcp"* ]]
   [[ "$seen_ports" != *"${AKVPS_HY2_PORT}/udp"* ]]
+  seen_ufw=""
+  ufw() {
+    seen_ufw="${seen_ufw}$*|"
+    return 0
+  }
+  MASTER_IPV4="192.0.2.10"
+  MASTER_IPV6=""
+  SELECT_VLESS=1
+  SELECT_HY2=0
+  SELECT_HY2_HOP=0
+  setup_ufw >/dev/null
+  [[ "$seen_ufw" == *"allow ${AKVPS_VLESS_PORT}/tcp comment vless reality"* ]]
+  [[ "$seen_ufw" != *"${AKVPS_HY2_PORT}/udp"* ]]
+  seen_dns=""
+  cf_zone_id() { echo "zone_mock"; }
+  upsert_dns_record() {
+    seen_dns="${seen_dns}$2:$3:$4|"
+    return 0
+  }
+  AKVPS_ROOT_DOMAIN="example.com"
+  NODE_DOMAIN="aktest.example.com"
+  PUBLIC_IPV4="198.51.100.7"
+  PUBLIC_IPV6=""
+  setup_dns >/dev/null
+  [[ "$seen_dns" == "A:aktest.example.com:198.51.100.7|" ]]
   echo "协议解析自检通过。"
 }
 
