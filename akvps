@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.90-mvp"
+AKVPS_VERSION="0.1.91-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -732,7 +732,7 @@ detect_ssh_port() {
 check_ports() {
   local entries=("${AKVPS_XUI_PORT}:tcp")
   [[ "$SELECT_VLESS" -eq 1 ]] && entries+=("${AKVPS_VLESS_PORT}:tcp")
-  [[ "$SELECT_HY2" -eq 1 ]] && entries+=("${AKVPS_HY2_PORT}:udp")
+  [[ "$SELECT_HY2" -eq 1 || "$SELECT_HY2_HOP" -eq 1 ]] && entries+=("${AKVPS_HY2_PORT}:udp")
   [[ "$SELECT_HY2_HOP" -eq 1 ]] && entries+=("${AKVPS_HY2_HOP_START}:udp")
   local entry p proto label
   for entry in "${entries[@]}"; do
@@ -1112,7 +1112,7 @@ setup_ufw() {
   ufw allow from "$MASTER_IPV4" to any port "$AKVPS_XUI_PORT" proto tcp comment "akvps x-ui master"
   [[ -n "$MASTER_IPV6" ]] && ufw allow from "$MASTER_IPV6" to any port "$AKVPS_XUI_PORT" proto tcp comment "akvps x-ui master ipv6"
   [[ "$SELECT_VLESS" -eq 1 ]] && ufw allow "$AKVPS_VLESS_PORT/tcp" comment "vless reality"
-  [[ "$SELECT_HY2" -eq 1 ]] && ufw allow "$AKVPS_HY2_PORT/udp" comment "hysteria2"
+  [[ "$SELECT_HY2" -eq 1 || "$SELECT_HY2_HOP" -eq 1 ]] && ufw allow "$AKVPS_HY2_PORT/udp" comment "hysteria2"
   [[ "$SELECT_HY2_HOP" -eq 1 ]] && ufw allow "$AKVPS_HY2_HOP_START:$AKVPS_HY2_HOP_END/udp" comment "hysteria2 hop"
   ufw --force enable
   ufw reload
@@ -1132,8 +1132,8 @@ set -eu
 if ! command -v iptables >/dev/null 2>&1; then
   exit 0
 fi
-iptables -t nat -C PREROUTING -p udp --dport ${AKVPS_HY2_HOP_START}:${AKVPS_HY2_HOP_END} -j REDIRECT --to-ports ${AKVPS_HY2_HOP_START} 2>/dev/null || \\
-iptables -t nat -A PREROUTING -p udp --dport ${AKVPS_HY2_HOP_START}:${AKVPS_HY2_HOP_END} -j REDIRECT --to-ports ${AKVPS_HY2_HOP_START}
+iptables -t nat -C PREROUTING -p udp --dport ${AKVPS_HY2_HOP_START}:${AKVPS_HY2_HOP_END} -j REDIRECT --to-ports ${AKVPS_HY2_PORT} 2>/dev/null || \\
+iptables -t nat -A PREROUTING -p udp --dport ${AKVPS_HY2_HOP_START}:${AKVPS_HY2_HOP_END} -j REDIRECT --to-ports ${AKVPS_HY2_PORT}
 EOF
   chmod 0755 "$AKVPS_HY2_HOP_REDIRECT"
   "$AKVPS_HY2_HOP_REDIRECT" || {
@@ -1158,7 +1158,7 @@ EOF
     systemctl daemon-reload
     systemctl enable --now "$(basename "$AKVPS_HY2_HOP_SERVICE")" >/dev/null 2>&1 || true
   fi
-  echo "HY2 端口跳跃转发已配置：${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}/udp -> ${AKVPS_HY2_HOP_START}/udp"
+  echo "HY2 端口跳跃转发已配置：${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}/udp -> ${AKVPS_HY2_PORT}/udp"
 }
 
 setup_panel_ufw() {
@@ -1560,7 +1560,7 @@ mock_client_link() {
   case "$kind" in
     vless) printf "vless://uuid@%s:443?type=tcp&encryption=none&security=reality&pbk=mock-public&fp=chrome&sni=www.microsoft.com&sid=abcd1234&spx=%%2F&flow=xtls-rprx-vision#aktest" "$host" ;;
     hy2) printf "hysteria2://auth@%s:11799?security=tls&alpn=h3&sni=%s#aktest" "$host" "$host" ;;
-    hy2hop) printf "hysteria2://auth@%s:39999?security=tls&alpn=h3&sni=%s&mport=%s-%s#aktest" "$host" "$host" "$AKVPS_HY2_HOP_START" "$AKVPS_HY2_HOP_END" ;;
+    hy2hop) printf "hysteria2://auth@%s:11799?security=tls&alpn=h3&sni=%s&mport=%s-%s#aktest" "$host" "$host" "$AKVPS_HY2_HOP_START" "$AKVPS_HY2_HOP_END" ;;
     *) printf "" ;;
   esac
 }
@@ -2385,14 +2385,14 @@ client_links_are_complete() {
   fi
   if [[ "$kind" == "hy2hop" ]]; then
     hop_ports="${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}"
-    printf "%s" "$response" | jq -e --arg scheme "$scheme" --arg ports "$hop_ports" '
+    printf "%s" "$response" | jq -e --arg scheme "$scheme" --arg ports "$hop_ports" --arg basePort ":${AKVPS_HY2_PORT}" '
       def links:
         if (.obj | type) == "array" then .obj
         elif (.obj | type) == "string" then (.obj | split("\n") | map(select(length > 0)))
         else []
         end;
       .success == true
-      and any(links[]; type == "string" and startswith($scheme) and contains("mport=" + $ports))' >/dev/null 2>&1 || return 1
+      and any(links[]; type == "string" and startswith($scheme) and contains($basePort) and contains("mport=" + $ports))' >/dev/null 2>&1 || return 1
   fi
 }
 
@@ -2826,7 +2826,7 @@ ensure_master_inbounds() {
     ensure_master_inbound "$node_id" "hy2" "akvps-${NODE_NAME}-hy2" "${NODE_NAME} hy2" "$AKVPS_HY2_PORT" || ok=0
   fi
   if [[ "$want_hy2hop" -eq 1 ]]; then
-    ensure_master_inbound "$node_id" "hy2hop" "akvps-${NODE_NAME}-hy2hop" "${NODE_NAME} hy2端口跳跃" "$AKVPS_HY2_HOP_START" || ok=0
+    ensure_master_inbound "$node_id" "hy2hop" "akvps-${NODE_NAME}-hy2hop" "${NODE_NAME} hy2端口跳跃" "$AKVPS_HY2_PORT" || ok=0
   fi
   [[ "$ok" -eq 1 ]] || {
     echo "提示：有入站未自动创建成功，可先在主控面板手动补。"
@@ -3159,7 +3159,7 @@ generate_report() {
   proto_lines=""
   [[ "$SELECT_VLESS" -eq 1 ]] && proto_lines+=$'\n'"- VLESS Reality：端口 ${AKVPS_VLESS_PORT}/tcp"
   [[ "$SELECT_HY2" -eq 1 ]] && proto_lines+=$'\n'"- Hysteria2：端口 ${AKVPS_HY2_PORT}/udp"
-  [[ "$SELECT_HY2_HOP" -eq 1 ]] && proto_lines+=$'\n'"- Hysteria2 端口跳跃：${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}/udp"
+  [[ "$SELECT_HY2_HOP" -eq 1 ]] && proto_lines+=$'\n'"- Hysteria2 端口跳跃：服务端口 ${AKVPS_HY2_PORT}/udp，跳跃范围 ${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}/udp"
   if is_local_master_panel; then
     connect_block="## 二、主控本机使用
 
@@ -3522,7 +3522,7 @@ self_check_inbounds() {
   NODE_XUI_URL=""
   vless="$(build_minimal_inbound_payload 1 vless akvps-aktest-vless "aktest vless" "$AKVPS_VLESS_PORT" 0 "")"
   hy2="$(build_minimal_inbound_payload 1 hy2 akvps-aktest-hy2 "aktest hy2" "$AKVPS_HY2_PORT" 0 "")"
-  hy2hop="$(build_minimal_inbound_payload 1 hy2hop akvps-aktest-hy2hop "aktest hy2端口跳跃" "$AKVPS_HY2_HOP_START" 0 "")"
+  hy2hop="$(build_minimal_inbound_payload 1 hy2hop akvps-aktest-hy2hop "aktest hy2端口跳跃" "$AKVPS_HY2_PORT" 0 "")"
   printf "%s" "$vless" | jq -e '
     .protocol == "vless"
     and (.settings | fromjson | .clients | length) == 0
@@ -3541,7 +3541,8 @@ self_check_inbounds() {
     and (.streamSettings | fromjson | .tlsSettings.certificates[0].certificateFile) == "/root/cert/aktest.example.com/fullchain.pem"
     and (.streamSettings | fromjson | .tlsSettings.certificates[0].keyFile) == "/root/cert/aktest.example.com/privkey.pem"' >/dev/null
   printf "%s" "$hy2hop" | jq -e '
-    (.streamSettings | fromjson | .finalmask.quicParams.udpHop.ports) == "39999-59999"
+    .port == 11799
+    and (.streamSettings | fromjson | .finalmask.quicParams.udpHop.ports) == "39999-59999"
     and (.streamSettings | fromjson | .hysteriaSettings.finalmask.quicParams.udpHop.ports) == "39999-59999"
     and (.streamSettings | fromjson | .tlsSettings.certificates[0].certificateFile) == "/root/cert/aktest.example.com/fullchain.pem"
     and (.streamSettings | fromjson | .tlsSettings.certificates[0].keyFile) == "/root/cert/aktest.example.com/privkey.pem"' >/dev/null
@@ -3553,8 +3554,9 @@ self_check_inbounds() {
   [[ "$(expected_client_link_scheme vless)" == "vless://" ]]
   [[ "$(expected_client_link_scheme hy2)" == "hysteria2://" ]]
   [[ "$(expected_client_link_scheme hy2hop)" == "hysteria2://" ]]
-  client_links_are_complete '{"success":true,"obj":["hysteria2://auth@example:39999?security=tls&mport=39999-59999"]}' hy2hop "hysteria2://"
-  client_links_are_complete '{"success":true,"obj":"hysteria2://auth@example:39999?security=tls&mport=39999-59999\n"}' hy2hop "hysteria2://"
+  client_links_are_complete '{"success":true,"obj":["hysteria2://auth@example:11799?security=tls&mport=39999-59999"]}' hy2hop "hysteria2://"
+  client_links_are_complete '{"success":true,"obj":"hysteria2://auth@example:11799?security=tls&mport=39999-59999\n"}' hy2hop "hysteria2://"
+  ! client_links_are_complete '{"success":true,"obj":["hysteria2://auth@example:39999?security=tls&mport=39999-59999"]}' hy2hop "hysteria2://"
   ! client_links_are_complete '{"success":true,"obj":["hysteria2://auth@example:39999?security=tls"]}' hy2hop "hysteria2://"
   client_links_are_complete '{"success":true,"obj":["vless://uuid@example:443?type=tcp&encryption=none&security=reality&pbk=pub&sid=abcd&sni=www.microsoft.com&fp=chrome&flow=xtls-rprx-vision#aktest"]}' vless "vless://"
   client_links_are_complete '{"success":true,"obj":"vless://uuid@example:443?type=tcp&encryption=none&security=reality&pbk=pub&sid=abcd&sni=www.microsoft.com&fp=chrome&flow=xtls-rprx-vision#aktest\n"}' vless "vless://"
@@ -3605,9 +3607,10 @@ self_check_inbounds() {
     and (.settings | type) == "string"
     and (.streamSettings | type) == "string"
     and (.sniffing | type) == "string"' >/dev/null
-  hy2hop="$(build_minimal_inbound_payload 1 hy2hop akvps-aktest-hy2hop "aktest hy2端口跳跃" "$AKVPS_HY2_HOP_START" 8 '{"settings":{"clients":[{"email":"old-hy","id":"old-id"}]},"streamSettings":{"network":"hysteria","security":"tls","hysteriaSettings":{"version":2,"auth":"old-auth","udpIdleTimeout":120,"masquerade":{"type":"proxy","url":"https://old.example"},"finalmask":{"udp":[{"type":"salamander","settings":{"password":"oldpass"}}],"quicParams":{"udpHop":{"ports":"30000-40000","interval":"7-9"}}}},"tlsSettings":{"serverName":"old.example","alpn":["h3"],"fingerprint":"chrome"},"externalProxy":[{"forceTls":"same","dest":"node.example","port":443,"remark":"old"}],"finalmask":{"udp":[{"type":"salamander","settings":{"password":"oldpass"}}]}}}')"
+  hy2hop="$(build_minimal_inbound_payload 1 hy2hop akvps-aktest-hy2hop "aktest hy2端口跳跃" "$AKVPS_HY2_PORT" 8 '{"settings":{"clients":[{"email":"old-hy","id":"old-id"}]},"streamSettings":{"network":"hysteria","security":"tls","hysteriaSettings":{"version":2,"auth":"old-auth","udpIdleTimeout":120,"masquerade":{"type":"proxy","url":"https://old.example"},"finalmask":{"udp":[{"type":"salamander","settings":{"password":"oldpass"}}],"quicParams":{"udpHop":{"ports":"30000-40000","interval":"7-9"}}}},"tlsSettings":{"serverName":"old.example","alpn":["h3"],"fingerprint":"chrome"},"externalProxy":[{"forceTls":"same","dest":"node.example","port":443,"remark":"old"}],"finalmask":{"udp":[{"type":"salamander","settings":{"password":"oldpass"}}]}}}')"
   printf "%s" "$hy2hop" | jq -e '
-    (.settings | fromjson | .clients[0].email) == "old-hy"
+    .port == 11799
+    and (.settings | fromjson | .clients[0].email) == "old-hy"
     and (.streamSettings | fromjson | .hysteriaSettings.auth) == "old-auth"
     and (.streamSettings | fromjson | .hysteriaSettings.udpIdleTimeout) == 120
     and (.streamSettings | fromjson | .hysteriaSettings.masquerade.type) == "proxy"
@@ -3684,7 +3687,7 @@ self_check_master_flow() {
     (.inbounds | length) == 2
     and any(.inbounds[]; .tag == "akvps-aktest-vless" and .protocol == "vless" and (.streamSettings | fromjson | .security) == "reality")
     and all(.inbounds[]; .nodeId == 7 and .shareAddrStrategy == "node" and .shareAddr == "")
-    and any(.inbounds[]; .tag == "akvps-aktest-hy2hop" and .protocol == "hysteria"
+    and any(.inbounds[]; .tag == "akvps-aktest-hy2hop" and .protocol == "hysteria" and .port == 11799
       and (.streamSettings | fromjson | .finalmask.quicParams.udpHop.ports) == "39999-59999"
       and (.streamSettings | fromjson | .hysteriaSettings.finalmask.quicParams.udpHop.ports) == "39999-59999")
     and ([.inbounds[].tag] | index("akvps-aktest-hy2") | not)

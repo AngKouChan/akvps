@@ -167,7 +167,7 @@ END
 - Komari 主站：外部开放 `80/tcp`、`443/tcp`，后端 `25774/tcp` 不直接开放。
 - VLESS Reality：`11789/tcp`。
 - Hysteria2：`11799/udp`。
-- Hysteria2 端口跳跃：`39999-59999/udp`。
+- Hysteria2 端口跳跃：服务端口 `11799/udp`，跳跃范围 `39999-59999/udp`。
 
 ## 本机文件
 
