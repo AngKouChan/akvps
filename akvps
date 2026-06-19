@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.86-mvp"
+AKVPS_VERSION="0.1.87-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -780,7 +780,7 @@ prompt_protocols() {
   echo "可多选，例如 1 2"
   echo "1. VLESS Reality"
   echo "2. Hysteria2"
-  echo "3. Hysteria2 + 端口跳跃"
+  echo "3. Hysteria2 端口跳跃"
   while true; do
     read -r -p "请选择协议: " choices
     SELECT_VLESS=0
@@ -790,10 +790,10 @@ prompt_protocols() {
       case "$c" in
         1) SELECT_VLESS=1 ;;
         2) SELECT_HY2=1 ;;
-        3) SELECT_HY2=1; SELECT_HY2_HOP=1 ;;
+        3) SELECT_HY2_HOP=1 ;;
       esac
     done
-    [[ "$SELECT_VLESS" -eq 1 || "$SELECT_HY2" -eq 1 ]] && break
+    [[ "$SELECT_VLESS" -eq 1 || "$SELECT_HY2" -eq 1 || "$SELECT_HY2_HOP" -eq 1 ]] && break
     echo "至少选择一个协议。"
   done
 }
@@ -1215,6 +1215,19 @@ wait_dns_for_domain() {
 
 random_string() {
   openssl rand -hex 64 | cut -c "1-${1:-18}"
+}
+
+hy2_obfs_password() {
+  local old_stream="$1" password
+  password="$(printf "%s" "$old_stream" | jq -r '
+    first(
+      (.finalmask.udp // [])[]?
+      | select(.type == "salamander")
+      | .settings.password
+      | select(type == "string" and length > 0)
+    ) // empty' 2>/dev/null || true)"
+  [[ -n "$password" ]] || password="$(random_string 16)"
+  printf "%s" "$password"
 }
 
 random_uuid() {
@@ -1911,7 +1924,6 @@ master_inbound_saved_complete() {
         and (($stream.tlsSettings.certificates[0].keyFile // "") != "")
         and (if $kind == "hy2hop" then
           ($stream.finalmask.quicParams.udpHop.ports // "") == $ports
-          and ($stream.hysteriaSettings.finalmask.quicParams.udpHop.ports // "") == $ports
         else true end)
       else
         true
@@ -2503,7 +2515,7 @@ ensure_master_client() {
 build_minimal_inbound_payload() {
   local node_id="$1" kind="$2" tag="$3" remark="$4" port="$5" inbound_id="${6:-0}" existing_json="${7:-}"
   local protocol settings stream sniffing short_id key_pair private_key public_key
-  local old_settings old_stream old_private old_public old_short_ids old_target old_server_names cert_pair cert_file key_file
+  local old_settings old_stream old_private old_public old_short_ids old_target old_server_names cert_pair cert_file key_file obfs_password
   old_settings="$(existing_inbound_settings "$existing_json")"
   old_stream="$(existing_inbound_stream "$existing_json")"
   sniffing='{"enabled":true,"destOverride":["http","tls","quic","fakedns"],"metadataOnly":false,"routeOnly":false,"ipsExcluded":[],"domainsExcluded":[]}'
@@ -2555,12 +2567,14 @@ build_minimal_inbound_payload() {
       cert_pair="$(node_web_cert_files "$node_id")"
       cert_file="${cert_pair%%|*}"
       key_file="${cert_pair#*|}"
+      obfs_password="$(hy2_obfs_password "$old_stream")"
       if [[ "$kind" == "hy2hop" ]]; then
         stream="$(jq -cn \
           --argjson old "$old_stream" \
           --arg ports "${AKVPS_HY2_HOP_START}-${AKVPS_HY2_HOP_END}" \
           --arg certFile "$cert_file" \
           --arg keyFile "$key_file" \
+          --arg obfsPassword "$obfs_password" \
           '$old
           + {
             network:"hysteria",
@@ -2602,10 +2616,13 @@ build_minimal_inbound_payload() {
             ),
             finalmask:(
               ($old.finalmask // {})
-              * {quicParams:{udpHop:{
+              * {
+                udp:(if ((($old.finalmask.udp // []) | length) > 0) then $old.finalmask.udp else [{type:"salamander",settings:{password:$obfsPassword}}] end),
+                quicParams:{udpHop:{
                 ports:$ports,
                 interval:($old.finalmask.quicParams.udpHop.interval // $old.hysteriaSettings.finalmask.quicParams.udpHop.interval // "5-10")
-              }}}
+              }}
+              }
             )
           }')"
       else
@@ -2613,6 +2630,7 @@ build_minimal_inbound_payload() {
           --argjson old "$old_stream" \
           --arg certFile "$cert_file" \
           --arg keyFile "$key_file" \
+          --arg obfsPassword "$obfs_password" \
           '$old
           + {
             network:"hysteria",
@@ -2644,6 +2662,10 @@ build_minimal_inbound_payload() {
                   end
                 )
               }
+            ),
+            finalmask:(
+              ($old.finalmask // {})
+              * {udp:(if ((($old.finalmask.udp // []) | length) > 0) then $old.finalmask.udp else [{type:"salamander",settings:{password:$obfsPassword}}] end)}
             )
           }')"
       fi

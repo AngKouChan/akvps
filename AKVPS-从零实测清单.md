@@ -1,21 +1,21 @@
 # AKVPS 从零实测清单
 
-更新时间：2026-06-19 00:04 CST
+更新时间：2026-06-19
 
 ## 一、测试版本
 
-当前测试固定版：`0.1.77-mvp`
+当前测试固定版：`0.1.87-mvp`
 
 固定提交：
 
 ```text
-e091bf39c50a89ef9da98f702d73928b2eb49360
+5c02f79aec1ef80f93332e30eba90790f6ff1d0e
 ```
 
 安装命令：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/AngKouChan/akvps/e091bf39c50a89ef9da98f702d73928b2eb49360/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/AngKouChan/akvps/5c02f79aec1ef80f93332e30eba90790f6ff1d0e/install.sh)
 ```
 
 注意：不要使用 `main` raw 地址测试。当前 GitHub raw 的 `main` 仍可能缓存旧版。
@@ -47,7 +47,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/AngKouChan/akvps/e091bf39c50
 1. 在节点 VPS 执行同一个安装命令。
 2. 使用一键导入粘贴主控卡片。
 3. 部署代理节点。
-4. 选择协议，建议先测 `vless / hy2端口跳跃`。
+4. 选择协议，当前已验收 `vless`；`hy2` 和 `hy2端口跳跃` 需单独实测。
 5. 执行一键接入主控。
 
 验收：
@@ -56,9 +56,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/AngKouChan/akvps/e091bf39c50
 - 节点状态 online。
 - Xray 状态正常。
 - 自动生成 VLESS Reality 入站。
-- 自动生成 HY2 端口跳跃入站。
+- 如选择 HY2 / HY2 端口跳跃，应自动生成对应入站。
 - 自动生成客户端。
 - 客户端已写入对应入站的 `settings.clients`。
+- 如果 3x-ui 客户端页的关联入站只显示数字，强制刷新页面后应显示入站名称。
 
 ## 五、客户端测试
 
@@ -70,9 +71,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/AngKouChan/akvps/e091bf39c50
 验收：
 
 - v2rayN 能识别 VLESS Reality。
-- v2rayN 能识别 HY2 或 HY2 端口跳跃。
+- 如果本轮测试选择 HY2 或 HY2 端口跳跃，v2rayN 应能识别对应链接。
 - 至少一个节点延迟正常。
 - 能实际访问外网。
+- 3x-ui 客户端页和入站页能看到流量回传。
 
 ## 六、出错时回传给小寇
 
@@ -84,5 +86,6 @@ bash <(curl -fsSL https://raw.githubusercontent.com/AngKouChan/akvps/e091bf39c50
 - 面板里节点状态。
 - 面板里入站和客户端是否出现。
 - v2rayN 报错文字。
+- 3x-ui 客户端页是否强制刷新过。
 
 不要发完整 API Token、私钥、UUID、订阅密钥。
