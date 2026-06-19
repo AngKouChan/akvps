@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.87-mvp"
+AKVPS_VERSION="0.1.88-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1199,17 +1199,22 @@ resolve_ipv4_public() {
 
 wait_dns_for_domain() {
   local domain="$1"
-  local i resolved=""
-  for i in $(seq 1 30); do
+  local i second resolved="" total_attempts=30 interval=10 remaining
+  for i in $(seq 1 "$total_attempts"); do
     resolved="$(resolve_ipv4_public "$domain")"
     [[ -n "$resolved" ]] || resolved="$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ' || true)"
     if [[ " $resolved " == *" $PUBLIC_IPV4 "* ]]; then
+      printf "\r%*s\r" 80 ""
       echo "DNS 已生效：$domain -> $PUBLIC_IPV4"
       return 0
     fi
-    echo "等待 DNS 生效中... $i/30"
-    sleep 10
+    for second in $(seq "$interval" -1 1); do
+      remaining=$(( (total_attempts - i) * interval + second ))
+      printf "\r等待 DNS 生效中... 剩余约 %3d 秒" "$remaining"
+      sleep 1
+    done
   done
+  printf "\r%*s\r" 80 ""
   die "DNS 暂未解析到当前 VPS IPv4。" "请稍后重新运行 akvps，或检查 Cloudflare DNS。"
 }
 
