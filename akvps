@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.93-mvp"
+AKVPS_VERSION="0.1.94-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -3946,11 +3946,11 @@ show_simple_deploy_report() {
   master_inbound_status_lines || true
 }
 
-one_click_deploy() {
+one_click_node_deploy() {
   need_root
   ensure_dirs
   AKVPS_AUTO_DEPLOY=1
-  info "一键部署"
+  info "一键部署代理节点"
   echo "流程：信息注入 -> 代理节点 -> 探针节点 -> 极简报告"
   echo
   import_all_info
@@ -3966,6 +3966,25 @@ one_click_deploy() {
   load_envs
   show_simple_deploy_report
   AKVPS_AUTO_DEPLOY=0
+}
+
+one_click_deploy() {
+  while true; do
+    echo
+    echo "一键部署"
+    echo "这台 VPS 准备做什么？"
+    echo "1. 代理节点"
+    echo "2. 3x-ui 主控"
+    echo "3. 探针站"
+    echo "0. 返回"
+    read -r -p "请选择: " sub
+    case "$sub" in
+      1) one_click_node_deploy; return ;;
+      2) deploy_master_panel; return ;;
+      3) deploy_komari_server; return ;;
+      0) return ;;
+    esac
+  done
 }
 
 local_deploy_menu() {
