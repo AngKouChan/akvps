@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.101-mvp"
+AKVPS_VERSION="0.1.102-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -3430,6 +3430,9 @@ prompt_komari() {
   if [[ -n "$KOMARI_MONTH_ROTATE" ]]; then
     [[ "$KOMARI_MONTH_ROTATE" =~ ^([0-9]|[12][0-9]|3[01])$ ]] || die "网络统计月重置日格式不正确。" "请填写 0 到 31。"
     echo "网络统计月重置日：$KOMARI_MONTH_ROTATE"
+  elif [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
+    KOMARI_MONTH_ROTATE="7"
+    echo "网络统计月重置日：7（默认）"
   else
     while true; do
       read -r -p "请输入网络统计月重置日，0=禁用，1-31=每月日期: " KOMARI_MONTH_ROTATE
