@@ -32,4 +32,7 @@ bash akvps check-redaction >/dev/null
 echo "检查调优参数..."
 bash akvps check-tuning >/dev/null
 
+echo "检查软件安装修复..."
+bash akvps check-package-repair >/dev/null
+
 echo "检查完成。"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.102-mvp"
+AKVPS_VERSION="0.1.103-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -879,24 +879,45 @@ prompt_protocols() {
   done
 }
 
+apt_update_safe() {
+  apt-get update --allow-releaseinfo-change || apt-get update
+}
+
+repair_dpkg_state() {
+  command -v dpkg >/dev/null 2>&1 || return 0
+  if dpkg --audit 2>/dev/null | grep -q .; then
+    echo "检测到上次软件安装未完成，正在自动修复。"
+    DEBIAN_FRONTEND=noninteractive dpkg --configure -a
+  fi
+}
+
+install_packages() {
+  repair_dpkg_state
+  apt_update_safe
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$@"; then
+    echo "软件安装遇到系统残留问题，正在修复后重试。"
+    DEBIAN_FRONTEND=noninteractive dpkg --configure -a || true
+    DEBIAN_FRONTEND=noninteractive apt-get -f install -y -q || true
+    apt_update_safe
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$@"
+  fi
+}
+
 install_base_tools() {
   info "安装必要工具"
-  apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -q curl ca-certificates ufw jq unzip tar cron openssl sqlite3 iproute2 iptables libc-bin
+  install_packages curl ca-certificates ufw jq unzip tar cron openssl sqlite3 iproute2 iptables libc-bin
   timedatectl set-timezone Asia/Shanghai || true
 }
 
 install_light_tools() {
   info "安装必要工具"
-  apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -q curl ca-certificates
+  install_packages curl ca-certificates
   timedatectl set-timezone Asia/Shanghai || true
 }
 
 install_komari_server_tools() {
   info "安装必要工具"
-  apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -q curl ca-certificates caddy
+  install_packages curl ca-certificates caddy
   timedatectl set-timezone Asia/Shanghai || true
 }
 
@@ -4067,6 +4088,39 @@ EOF
   echo "调优参数自检通过。"
 }
 
+self_check_package_repair() {
+  local tmp_dir old_path calls
+  tmp_dir="$(mktemp -d)"
+  old_path="$PATH"
+  PATH="$tmp_dir:$PATH"
+  cat >"$tmp_dir/dpkg" <<'EOF'
+#!/usr/bin/env bash
+echo "dpkg $*" >>"$AKVPS_TEST_CALLS"
+if [[ "${1:-}" == "--audit" ]]; then
+  echo "package install was interrupted"
+fi
+exit 0
+EOF
+  cat >"$tmp_dir/apt-get" <<'EOF'
+#!/usr/bin/env bash
+echo "apt-get $*" >>"$AKVPS_TEST_CALLS"
+exit 0
+EOF
+  chmod +x "$tmp_dir/dpkg" "$tmp_dir/apt-get"
+  AKVPS_TEST_CALLS="$tmp_dir/calls"
+  export AKVPS_TEST_CALLS
+  install_packages curl ca-certificates >/dev/null
+  calls="$(cat "$AKVPS_TEST_CALLS")"
+  [[ "$calls" == *"dpkg --audit"* ]]
+  [[ "$calls" == *"dpkg --configure -a"* ]]
+  [[ "$calls" == *"apt-get update --allow-releaseinfo-change"* ]]
+  [[ "$calls" == *"apt-get install -y -q curl ca-certificates"* ]]
+  PATH="$old_path"
+  unset AKVPS_TEST_CALLS
+  rm -rf "$tmp_dir"
+  echo "软件安装修复自检通过。"
+}
+
 initial_setup() {
   node_deploy
 }
@@ -4449,6 +4503,7 @@ case "${1:-menu}" in
   check-master-flow|self-check-master-flow) self_check_master_flow ;;
   check-redaction|self-check-redaction) self_check_redaction ;;
   check-tuning|self-check-tuning) self_check_tuning ;;
+  check-package-repair|self-check-package-repair) self_check_package_repair ;;
   menu) main_menu ;;
   one-click|one-click-deploy) one_click_deploy ;;
   init|initial-setup|node|node-deploy) node_deploy ;;
