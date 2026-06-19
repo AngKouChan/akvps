@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.94-mvp"
+AKVPS_VERSION="0.1.95-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -785,6 +785,7 @@ check_hy2_hop_range() {
   if [[ -n "$stale" ]]; then
     echo "- HY2 端口跳跃范围：${label} 检测到旧 3x-ui / Xray 监听，将在本次部署中改回 ${AKVPS_HY2_PORT}/udp"
   fi
+  return 0
 }
 
 check_ports() {
@@ -793,6 +794,7 @@ check_ports() {
   [[ "$SELECT_VLESS" -eq 1 ]] && check_service_port "$AKVPS_VLESS_PORT" tcp "${AKVPS_VLESS_PORT}/tcp" "VLESS Reality" 1
   [[ "$SELECT_HY2" -eq 1 || "$SELECT_HY2_HOP" -eq 1 ]] && check_service_port "$AKVPS_HY2_PORT" udp "${AKVPS_HY2_PORT}/udp" "Hysteria2 服务端口" 1
   [[ "$SELECT_HY2_HOP" -eq 1 ]] && check_hy2_hop_range
+  return 0
 }
 
 prompt_node() {
@@ -3721,6 +3723,14 @@ self_check_protocols() {
   [[ "$seen_ports" == *"${AKVPS_VLESS_PORT}/tcp"* ]]
   [[ "$seen_ports" == *"${AKVPS_HY2_PORT}/udp"* ]]
   [[ "$seen_ports" == *"${AKVPS_HY2_HOP_START}/udp"* ]]
+  seen_ports=""
+  SELECT_VLESS=1
+  SELECT_HY2=0
+  SELECT_HY2_HOP=0
+  check_ports
+  [[ "$seen_ports" == *"${AKVPS_XUI_PORT}/tcp"* ]]
+  [[ "$seen_ports" == *"${AKVPS_VLESS_PORT}/tcp"* ]]
+  [[ "$seen_ports" != *"${AKVPS_HY2_PORT}/udp"* ]]
   echo "协议解析自检通过。"
 }
 
