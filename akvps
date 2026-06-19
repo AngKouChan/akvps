@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.97-mvp"
+AKVPS_VERSION="0.1.98-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -54,8 +54,6 @@ SELECT_VLESS=0
 SELECT_HY2=0
 SELECT_HY2_HOP=0
 TUNING_MODE="smart"
-LOCAL_DOWN_MBPS="1000"
-LOCAL_UP_MBPS="50"
 VPS_MBPS="1000"
 RTT_MS=""
 LINE_QUALITY="1"
@@ -170,8 +168,6 @@ load_envs() {
   NODE_PROTOCOLS="${NODE_PROTOCOLS:-}"
   XUI_WEB_BASE_PATH="${XUI_WEB_BASE_PATH:-}"
   TUNING_MODE="${TUNING_MODE:-smart}"
-  LOCAL_DOWN_MBPS="${LOCAL_DOWN_MBPS:-1000}"
-  LOCAL_UP_MBPS="${LOCAL_UP_MBPS:-50}"
   VPS_MBPS="${VPS_MBPS:-1000}"
   RTT_MS="${RTT_MS:-}"
   LINE_QUALITY="${LINE_QUALITY:-1}"
@@ -1095,24 +1091,23 @@ prompt_tuning() {
   info "调优选择"
   if [[ "$AKVPS_AUTO_DEPLOY" == "1" && -n "$RTT_MS" ]]; then
     TUNING_MODE="${TUNING_MODE:-smart}"
-    LOCAL_DOWN_MBPS="${LOCAL_DOWN_MBPS:-1000}"
-    LOCAL_UP_MBPS="${LOCAL_UP_MBPS:-50}"
     VPS_MBPS="${VPS_MBPS:-1000}"
     LINE_QUALITY="${LINE_QUALITY:-1}"
-    echo "调优：智能；VPS ${VPS_MBPS}Mbps；延迟 ${RTT_MS}ms；线路质量 ${LINE_QUALITY}"
+    echo "调优：${TUNING_MODE}；VPS ${VPS_MBPS}Mbps；延迟 ${RTT_MS}ms；线路质量 ${LINE_QUALITY}"
     return
   fi
-  read -r -p "是否启用智能调优？[Y/n] " ans
-  ans="${ans:-Y}"
-  if [[ "$ans" =~ ^[Nn]$ ]]; then
-    TUNING_MODE="basic"
-    return
-  fi
-  TUNING_MODE="smart"
-  read -r -p "本地下载 Mbps [1000]: " v
-  LOCAL_DOWN_MBPS="${v:-1000}"
-  read -r -p "本地上传 Mbps [50]: " v
-  LOCAL_UP_MBPS="${v:-50}"
+  echo "调优模式："
+  echo "1. 稳妥调优（推荐）"
+  echo "2. 进阶网络调优"
+  echo "3. 基础调优"
+  read -r -p "请选择 [1]: " ans
+  ans="${ans:-1}"
+  case "$ans" in
+    2) TUNING_MODE="advanced" ;;
+    3) TUNING_MODE="basic" ;;
+    *) TUNING_MODE="smart" ;;
+  esac
+  [[ "$TUNING_MODE" == "basic" ]] && return
   read -r -p "VPS 标称 Mbps [1000]: " v
   VPS_MBPS="${v:-1000}"
   while [[ -z "$RTT_MS" ]]; do
@@ -1129,11 +1124,20 @@ prompt_tuning() {
 apply_tuning() {
   info "应用系统调优"
   [[ -f "$AKVPS_SYSCTL" ]] && cp -a "$AKVPS_SYSCTL" "$AKVPS_SYSCTL.bak.$(date +%F-%H%M%S)"
-  local mem_kb mem_mb tcp_mem udp_mem rmem_max wmem_max
-  mem_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
-  mem_mb=$((mem_kb / 1024))
+  local mem_kb mem_mb tcp_mem udp_mem rmem_max wmem_max somaxconn backlog syn_backlog notsent_lowat adv_win_scale
+  if [[ -r /proc/meminfo ]]; then
+    mem_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
+    mem_mb=$((mem_kb / 1024))
+  else
+    mem_mb=2048
+  fi
   rmem_max=67108864
   wmem_max=67108864
+  somaxconn=4096
+  backlog=4096
+  syn_backlog=4096
+  notsent_lowat=16384
+  adv_win_scale=2
   if [[ "$TUNING_MODE" == "smart" ]]; then
     if (( VPS_MBPS >= 1000 && RTT_MS >= 150 )); then
       rmem_max=134217728
@@ -1143,6 +1147,28 @@ apply_tuning() {
       rmem_max=67108864
       wmem_max=67108864
     fi
+  elif [[ "$TUNING_MODE" == "advanced" ]]; then
+    rmem_max=$((VPS_MBPS * RTT_MS * 125))
+    if (( rmem_max < 16777216 )); then
+      rmem_max=16777216
+    elif (( rmem_max > 134217728 )); then
+      rmem_max=134217728
+    fi
+    wmem_max="$rmem_max"
+    backlog=$((VPS_MBPS * 3))
+    (( backlog < 2048 )) && backlog=2048
+    (( backlog > 16384 )) && backlog=16384
+    syn_backlog=$((backlog * 2))
+    (( syn_backlog > 32768 )) && syn_backlog=32768
+    somaxconn="$backlog"
+    notsent_lowat=4096
+    adv_win_scale=6
+    if [[ "$LINE_QUALITY" == "3" ]]; then
+      (( rmem_max > 67108864 )) && rmem_max=67108864
+      wmem_max="$rmem_max"
+      notsent_lowat=16384
+      adv_win_scale=2
+    fi
   fi
   tcp_mem="786432 1048576 1572864"
   udp_mem="262144 524288 1048576"
@@ -1151,19 +1177,35 @@ apply_tuning() {
     udp_mem="65536 131072 262144"
     rmem_max=33554432
     wmem_max=33554432
+    (( backlog > 2048 )) && backlog=2048
+    (( syn_backlog > 4096 )) && syn_backlog=4096
+    (( somaxconn > 2048 )) && somaxconn=2048
   fi
   cat > "$AKVPS_SYSCTL" <<EOF
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
+net.core.netdev_max_backlog=$backlog
 net.core.rmem_max=$rmem_max
 net.core.wmem_max=$wmem_max
+net.core.rmem_default=87380
+net.core.wmem_default=65536
+net.core.somaxconn=$somaxconn
+net.core.optmem_max=65536
 net.ipv4.tcp_rmem=4096 87380 $rmem_max
 net.ipv4.tcp_wmem=4096 65536 $wmem_max
 net.ipv4.tcp_mtu_probing=1
 net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_notsent_lowat=$notsent_lowat
+net.ipv4.tcp_window_scaling=1
+net.ipv4.tcp_adv_win_scale=$adv_win_scale
+net.ipv4.tcp_moderate_rcvbuf=1
+net.ipv4.tcp_max_syn_backlog=$syn_backlog
+net.ipv4.tcp_synack_retries=2
+net.ipv4.tcp_syn_retries=3
+net.ipv4.tcp_syncookies=1
 net.ipv4.tcp_mem=$tcp_mem
 net.ipv4.udp_mem=$udp_mem
-net.core.somaxconn=4096
 net.ipv4.ip_local_port_range=1024 65535
 EOF
   sysctl --system >/dev/null
@@ -3962,6 +4004,47 @@ EOF
   echo "敏感输出遮挡自检通过。"
 }
 
+self_check_tuning() {
+  local tmp_dir old_sysctl_path old_tuning old_vps old_rtt old_quality old_path content
+  tmp_dir="$(mktemp -d)"
+  old_sysctl_path="$AKVPS_SYSCTL"
+  old_tuning="$TUNING_MODE"
+  old_vps="$VPS_MBPS"
+  old_rtt="$RTT_MS"
+  old_quality="$LINE_QUALITY"
+  old_path="$PATH"
+  AKVPS_SYSCTL="$tmp_dir/99-akvps.conf"
+  PATH="$tmp_dir:$PATH"
+  cat >"$tmp_dir/sysctl" <<'EOF'
+#!/usr/bin/env sh
+exit 0
+EOF
+  chmod +x "$tmp_dir/sysctl"
+  TUNING_MODE="advanced"
+  VPS_MBPS=2000
+  RTT_MS=140
+  LINE_QUALITY=1
+  apply_tuning >/dev/null
+  content="$(cat "$AKVPS_SYSCTL")"
+  [[ "$content" == *"net.core.default_qdisc=fq"* ]]
+  [[ "$content" == *"net.ipv4.tcp_congestion_control=bbr"* ]]
+  [[ "$content" == *"net.core.netdev_max_backlog=6000"* ]]
+  [[ "$content" == *"net.ipv4.tcp_max_syn_backlog=12000"* ]]
+  [[ "$content" == *"net.ipv4.tcp_notsent_lowat=4096"* ]]
+  [[ "$content" == *"net.ipv4.tcp_adv_win_scale=6"* ]]
+  [[ "$content" != *"kernel.panic"* ]]
+  [[ "$content" != *"vm.panic_on_oom"* ]]
+  [[ "$content" != *"kernel.sysrq"* ]]
+  AKVPS_SYSCTL="$old_sysctl_path"
+  TUNING_MODE="$old_tuning"
+  VPS_MBPS="$old_vps"
+  RTT_MS="$old_rtt"
+  LINE_QUALITY="$old_quality"
+  PATH="$old_path"
+  rm -rf "$tmp_dir"
+  echo "调优参数自检通过。"
+}
+
 initial_setup() {
   node_deploy
 }
@@ -4343,6 +4426,7 @@ case "${1:-menu}" in
   check-protocols|self-check-protocols) self_check_protocols ;;
   check-master-flow|self-check-master-flow) self_check_master_flow ;;
   check-redaction|self-check-redaction) self_check_redaction ;;
+  check-tuning|self-check-tuning) self_check_tuning ;;
   menu) main_menu ;;
   one-click|one-click-deploy) one_click_deploy ;;
   init|initial-setup|node|node-deploy) node_deploy ;;
