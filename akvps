@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.99-mvp"
+AKVPS_VERSION="0.1.100-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1140,7 +1140,7 @@ prompt_tuning() {
 apply_tuning() {
   info "应用系统调优"
   [[ -f "$AKVPS_SYSCTL" ]] && cp -a "$AKVPS_SYSCTL" "$AKVPS_SYSCTL.bak.$(date +%F-%H%M%S)"
-  local mem_kb mem_mb tcp_mem udp_mem rmem_max wmem_max somaxconn backlog syn_backlog notsent_lowat adv_win_scale
+  local mem_kb mem_mb tcp_mem udp_mem rmem_max wmem_max somaxconn backlog syn_backlog notsent_lowat
   if [[ -r /proc/meminfo ]]; then
     mem_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
     mem_mb=$((mem_kb / 1024))
@@ -1153,7 +1153,6 @@ apply_tuning() {
   backlog=4096
   syn_backlog=4096
   notsent_lowat=16384
-  adv_win_scale=2
   if [[ "$TUNING_MODE" == "smart" ]]; then
     if (( VPS_MBPS >= 1000 && RTT_MS >= 150 )); then
       rmem_max=134217728
@@ -1178,12 +1177,10 @@ apply_tuning() {
     (( syn_backlog > 32768 )) && syn_backlog=32768
     somaxconn="$backlog"
     notsent_lowat=4096
-    adv_win_scale=6
     if [[ "$LINE_QUALITY" == "3" ]]; then
       (( rmem_max > 67108864 )) && rmem_max=67108864
       wmem_max="$rmem_max"
       notsent_lowat=16384
-      adv_win_scale=2
     fi
   fi
   tcp_mem="786432 1048576 1572864"
@@ -1214,7 +1211,6 @@ net.ipv4.tcp_fastopen=3
 net.ipv4.tcp_slow_start_after_idle=0
 net.ipv4.tcp_notsent_lowat=$notsent_lowat
 net.ipv4.tcp_window_scaling=1
-net.ipv4.tcp_adv_win_scale=$adv_win_scale
 net.ipv4.tcp_moderate_rcvbuf=1
 net.ipv4.tcp_max_syn_backlog=$syn_backlog
 net.ipv4.tcp_synack_retries=2
@@ -1224,7 +1220,7 @@ net.ipv4.tcp_mem=$tcp_mem
 net.ipv4.udp_mem=$udp_mem
 net.ipv4.ip_local_port_range=1024 65535
 EOF
-  sysctl --system >/dev/null
+  sysctl --system >/dev/null || echo "提示：部分调优参数未被当前内核接受，已继续后续部署。"
   sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc
 }
 
@@ -4049,7 +4045,7 @@ EOF
   [[ "$content" == *"net.core.netdev_max_backlog=6000"* ]]
   [[ "$content" == *"net.ipv4.tcp_max_syn_backlog=12000"* ]]
   [[ "$content" == *"net.ipv4.tcp_notsent_lowat=4096"* ]]
-  [[ "$content" == *"net.ipv4.tcp_adv_win_scale=6"* ]]
+  [[ "$content" != *"net.ipv4.tcp_adv_win_scale"* ]]
   [[ "$content" != *"kernel.panic"* ]]
   [[ "$content" != *"vm.panic_on_oom"* ]]
   [[ "$content" != *"kernel.sysrq"* ]]
