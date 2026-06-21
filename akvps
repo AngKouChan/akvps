@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.107-mvp"
+AKVPS_VERSION="0.1.108-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -57,6 +57,8 @@ SELECT_HY2_HOP=0
 TUNING_MODE="smart"
 KERNEL_MODE="stock"
 KERNEL_REBOOT_REQUIRED="0"
+TUNING_DONE="0"
+IPV6_DISABLED="0"
 VPS_MBPS="1000"
 RTT_MS=""
 LINE_QUALITY="1"
@@ -173,6 +175,8 @@ load_envs() {
   TUNING_MODE="${TUNING_MODE:-smart}"
   KERNEL_MODE="${KERNEL_MODE:-stock}"
   KERNEL_REBOOT_REQUIRED="${KERNEL_REBOOT_REQUIRED:-0}"
+  TUNING_DONE="${TUNING_DONE:-0}"
+  IPV6_DISABLED="${IPV6_DISABLED:-0}"
   VPS_MBPS="${VPS_MBPS:-1000}"
   RTT_MS="${RTT_MS:-}"
   LINE_QUALITY="${LINE_QUALITY:-1}"
@@ -686,7 +690,11 @@ show_dashboard() {
   echo "本机信息"
   echo "- 本机角色：$(slash_join_roles)"
   echo "- IPv4：${ipv4:-未检测到}"
-  echo "- IPv6：${ipv6:-未检测到}"
+  if [[ "$IPV6_DISABLED" == "1" ]]; then
+    echo "- IPv6：已禁用"
+  else
+    echo "- IPv6：${ipv6:-未检测到}"
+  fi
   echo "- 调优状态：$(tuning_status_text)"
   echo "- 节点类型：$(node_protocols_text)"
   echo "- 运行服务：$services"
@@ -1318,6 +1326,31 @@ net.ipv4.ip_local_port_range=1024 65535
 EOF
   sysctl --system >/dev/null || echo "提示：部分调优参数未被当前内核接受，已继续后续部署。"
   sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc
+  save_state_var "TUNING_DONE" "1"
+  TUNING_DONE="1"
+}
+
+disable_ipv6_optional() {
+  info "IPv6 设置"
+  read -r -p "是否禁用 IPv6？默认保留 IPv6 [y/N]: " ans
+  ans="${ans:-N}"
+  if [[ "$ans" =~ ^[Yy]$ ]]; then
+    cat >/etc/sysctl.d/98-akvps-disable-ipv6.conf <<'EOF'
+net.ipv6.conf.all.disable_ipv6=1
+net.ipv6.conf.default.disable_ipv6=1
+net.ipv6.conf.lo.disable_ipv6=1
+EOF
+    sysctl --system >/dev/null || echo "提示：IPv6 禁用配置已写入，部分参数可能需要重启后生效。"
+    save_state_var "IPV6_DISABLED" "1"
+    IPV6_DISABLED="1"
+    echo "已禁用 IPv6。"
+  else
+    rm -f /etc/sysctl.d/98-akvps-disable-ipv6.conf
+    sysctl -w net.ipv6.conf.all.disable_ipv6=0 net.ipv6.conf.default.disable_ipv6=0 net.ipv6.conf.lo.disable_ipv6=0 >/dev/null 2>&1 || true
+    save_state_var "IPV6_DISABLED" "0"
+    IPV6_DISABLED="0"
+    echo "已保留 IPv6。"
+  fi
 }
 
 run_bbrv3_tune_script() {
@@ -1340,6 +1373,8 @@ install_bbrv3() {
   if xanmod_kernel_active; then
     save_config_var "KERNEL_REBOOT_REQUIRED" "0"
     KERNEL_REBOOT_REQUIRED="0"
+    save_state_var "TUNING_DONE" "1"
+    TUNING_DONE="1"
     echo "BBRv3 优化已执行。"
   else
     save_config_var "KERNEL_REBOOT_REQUIRED" "1"
@@ -1358,6 +1393,8 @@ ensure_kernel_ready_before_services() {
   if xanmod_kernel_active; then
     save_config_var "KERNEL_REBOOT_REQUIRED" "0"
     KERNEL_REBOOT_REQUIRED="0"
+    save_state_var "TUNING_DONE" "1"
+    TUNING_DONE="1"
     if [[ "$KERNEL_MODE" != "bbrv3" ]]; then
       save_config_var "KERNEL_MODE" "bbrv3"
       KERNEL_MODE="bbrv3"
@@ -1374,6 +1411,42 @@ BBRv3 内核已安装，但还没有生效。
 重启后重新运行 akvps，再继续部署 3x-ui、Caddy、DNS 和探针。
 EOF
   exit 0
+}
+
+pre_tune_system() {
+  need_root
+  ensure_dirs
+  load_envs
+  check_system
+  install_base_tools
+  setup_swap
+  prompt_tuning
+  ensure_kernel_ready_before_services
+  apply_tuning
+  disable_ipv6_optional
+  save_state_var "TUNING_DONE" "1"
+  TUNING_DONE="1"
+  echo "部署前调优完成。后续部署不会覆盖这部分调优。"
+}
+
+ensure_pre_tuned_or_offer() {
+  load_envs
+  if [[ "$TUNING_DONE" == "1" ]]; then
+    echo "已检测到部署前调优，跳过调优步骤。"
+    return 0
+  fi
+  if [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
+    echo "提示：尚未完成部署前调优，本次将继续部署；建议之后从主菜单 1 单独执行。"
+    return 0
+  fi
+  echo "提示：尚未完成部署前调优。"
+  read -r -p "是否现在先执行部署前调优？[Y/n]: " ans
+  ans="${ans:-Y}"
+  if [[ "$ans" =~ ^[Yy]$ ]]; then
+    pre_tune_system
+  else
+    echo "已跳过部署前调优。"
+  fi
 }
 
 setup_ufw() {
@@ -4174,17 +4247,20 @@ EOF
 }
 
 self_check_tuning() {
-  local tmp_dir old_sysctl_path old_tuning old_kernel old_reboot old_vps old_rtt old_quality old_path content
+  local tmp_dir old_sysctl_path old_state old_tuning old_kernel old_reboot old_done old_vps old_rtt old_quality old_path content
   tmp_dir="$(mktemp -d)"
   old_sysctl_path="$AKVPS_SYSCTL"
+  old_state="$AKVPS_STATE"
   old_tuning="$TUNING_MODE"
   old_kernel="$KERNEL_MODE"
   old_reboot="$KERNEL_REBOOT_REQUIRED"
+  old_done="$TUNING_DONE"
   old_vps="$VPS_MBPS"
   old_rtt="$RTT_MS"
   old_quality="$LINE_QUALITY"
   old_path="$PATH"
   AKVPS_SYSCTL="$tmp_dir/99-akvps.conf"
+  AKVPS_STATE="$tmp_dir/state.env"
   PATH="$tmp_dir:$PATH"
   cat >"$tmp_dir/sysctl" <<'EOF'
 #!/usr/bin/env sh
@@ -4211,9 +4287,11 @@ EOF
   [[ "$content" != *"kernel.sysrq"* ]]
   [[ "$(tuning_status_text)" == *"进阶"* ]]
   AKVPS_SYSCTL="$old_sysctl_path"
+  AKVPS_STATE="$old_state"
   TUNING_MODE="$old_tuning"
   KERNEL_MODE="$old_kernel"
   KERNEL_REBOOT_REQUIRED="$old_reboot"
+  TUNING_DONE="$old_done"
   VPS_MBPS="$old_vps"
   RTT_MS="$old_rtt"
   LINE_QUALITY="$old_quality"
@@ -4249,6 +4327,25 @@ self_check_xanmod_flow() {
   grep -q '^KERNEL_REBOOT_REQUIRED=1$' "$config_path"
   rm -rf "$tmp_dir"
   echo "BBRv3 重启检查点自检通过。"
+}
+
+self_check_pre_tune_skip() {
+  local out called old_done old_auto
+  old_done="$TUNING_DONE"
+  old_auto="$AKVPS_AUTO_DEPLOY"
+  TUNING_DONE="1"
+  AKVPS_AUTO_DEPLOY=0
+  called=0
+  pre_tune_system() {
+    called=1
+    return 0
+  }
+  out="$(ensure_pre_tuned_or_offer)"
+  [[ "$called" -eq 0 ]]
+  [[ "$out" == *"跳过调优步骤"* ]]
+  TUNING_DONE="$old_done"
+  AKVPS_AUTO_DEPLOY="$old_auto"
+  echo "部署流程跳过已完成调优自检通过。"
 }
 
 self_check_package_repair() {
@@ -4330,12 +4427,9 @@ node_deploy() {
   prompt_node
   prompt_protocols
   check_ports
+  ensure_pre_tuned_or_offer
   install_base_tools
   setup_ssh
-  setup_swap
-  prompt_tuning
-  ensure_kernel_ready_before_services
-  apply_tuning
   setup_ufw
   setup_dns
   wait_dns
@@ -4484,8 +4578,8 @@ deploy_master_panel() {
   if port_in_use "$AKVPS_PANEL_PORT"; then
     [[ -x "$XUI_BIN" ]] || die "端口 $AKVPS_PANEL_PORT 已被占用。" "请先释放端口，再重新运行 akvps。"
   fi
+  ensure_pre_tuned_or_offer
   install_base_tools
-  setup_swap
   setup_panel_ufw
   setup_dns_for_domain "$PANEL_DOMAIN"
   wait_dns_for_domain "$PANEL_DOMAIN"
@@ -4514,6 +4608,7 @@ deploy_komari_server() {
   check_system
   detect_public_ips
   prompt_komari_server
+  ensure_pre_tuned_or_offer
   install_komari_server_tools
   setup_komari_server_ufw
   setup_dns_for_domain "$KOMARI_SERVER_DOMAIN"
@@ -4672,20 +4767,22 @@ main_menu() {
     echo "Angkou-Vps 轻量版 akvps $AKVPS_VERSION"
     echo
     show_dashboard
-    echo "1. 开始部署"
-    echo "2. 基础设置"
-    echo "3. 本机部署"
-    echo "4. 日常维护"
-    echo "5. 更新 / 卸载"
+    echo "1. 部署前调优"
+    echo "2. 开始部署"
+    echo "3. 基础设置"
+    echo "4. 本机部署"
+    echo "5. 日常维护"
+    echo "6. 更新 / 卸载"
     echo "q. 退出"
     echo
     read -r -p "请选择: " choice
     case "$choice" in
-      1) one_click_deploy; pause_menu ;;
-      2) basic_settings_menu ;;
-      3) local_deploy_menu ;;
-      4) maintenance_menu ;;
-      5) updates_menu ;;
+      1) pre_tune_system; pause_menu ;;
+      2) one_click_deploy; pause_menu ;;
+      3) basic_settings_menu ;;
+      4) local_deploy_menu ;;
+      5) maintenance_menu ;;
+      6) updates_menu ;;
       q|Q) exit 0 ;;
     esac
   done
@@ -4700,9 +4797,11 @@ case "${1:-menu}" in
   check-redaction|self-check-redaction) self_check_redaction ;;
   check-tuning|self-check-tuning) self_check_tuning ;;
   check-bbrv3-flow|self-check-bbrv3-flow|check-xanmod-flow|self-check-xanmod-flow) self_check_xanmod_flow ;;
+  check-pre-tune-skip|self-check-pre-tune-skip) self_check_pre_tune_skip ;;
   check-package-repair|self-check-package-repair) self_check_package_repair ;;
   check-komari-month-rotate|self-check-komari-month-rotate) self_check_komari_month_rotate ;;
   menu) main_menu ;;
+  pre-tune|tune|preflight-tune) pre_tune_system ;;
   start|start-deploy|one-click|one-click-deploy) one_click_deploy ;;
   init|initial-setup|node|node-deploy) node_deploy ;;
   panel|deploy-panel|local-deploy) local_deploy_menu ;;
