@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.109-mvp"
+AKVPS_VERSION="0.1.110-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -11,11 +11,13 @@ AKVPS_LATEST_REPORT="/var/lib/akvps/latest-report.md"
 AKVPS_LATEST_PANEL_REPORT="/var/lib/akvps/latest-panel-report.md"
 AKVPS_LATEST_KOMARI_REPORT="/var/lib/akvps/latest-komari-report.md"
 AKVPS_LATEST_KOMARI_SERVER_REPORT="/var/lib/akvps/latest-komari-server-report.md"
+AKVPS_LATEST_SUB_REPORT="/var/lib/akvps/latest-subscription-report.md"
 AKVPS_SYSCTL="/etc/sysctl.d/99-akvps.conf"
 AKVPS_SSHD_CONF="/etc/ssh/sshd_config.d/99-akvps-key-only.conf"
 AKVPS_HY2_HOP_REDIRECT="/usr/local/sbin/akvps-hy2-hop-redirect"
 AKVPS_HY2_HOP_SERVICE="/etc/systemd/system/akvps-hy2-hop.service"
 AKVPS_BBRV3_SCRIPT_URL="https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/refs/heads/main/net-tcp-tune.sh"
+AKVPS_SUB_ROOT="/var/www/proxy-sub"
 AKVPS_ADMIN_ROOT_DOMAIN=""
 AKVPS_NODE_ROOT_DOMAIN=""
 AKVPS_ROOT_DOMAIN=""
@@ -51,6 +53,11 @@ KOMARI_TOKEN=""
 KOMARI_AUTO_DISCOVERY_KEY=""
 KOMARI_MONTH_ROTATE=""
 KOMARI_SERVER_NAME=""
+SUB_DOMAIN=""
+SUB_NAME=""
+SUB_SECRET_PATH=""
+SUB_MIHOME_FILE="dydlxxx.yaml"
+SUB_CLASH_FILE="clash.yaml"
 PUBLIC_IPV4=""
 PUBLIC_IPV6=""
 SELECT_VLESS=0
@@ -73,6 +80,7 @@ XUI_ACCESS_URL=""
 PANEL_REPORT_PATH=""
 KOMARI_REPORT_PATH=""
 KOMARI_SERVER_REPORT_PATH=""
+SUB_REPORT_PATH=""
 KOMARI_SERVER_REUSED=0
 AKVPS_AUTO_DEPLOY=0
 AKVPS_MOCK_API=0
@@ -195,10 +203,16 @@ load_envs() {
   KOMARI_TOKEN="${KOMARI_TOKEN:-}"
   KOMARI_AUTO_DISCOVERY_KEY="${KOMARI_AUTO_DISCOVERY_KEY:-}"
   KOMARI_MONTH_ROTATE="${KOMARI_MONTH_ROTATE:-}"
+  SUB_DOMAIN="${SUB_DOMAIN:-}"
+  SUB_NAME="${SUB_NAME:-}"
+  SUB_SECRET_PATH="${SUB_SECRET_PATH:-}"
+  SUB_MIHOME_FILE="${SUB_MIHOME_FILE:-dydlxxx.yaml}"
+  SUB_CLASH_FILE="${SUB_CLASH_FILE:-clash.yaml}"
   ROLE_MASTER_PANEL="${ROLE_MASTER_PANEL:-0}"
   ROLE_NODE="${ROLE_NODE:-0}"
   ROLE_KOMARI_AGENT="${ROLE_KOMARI_AGENT:-0}"
   ROLE_KOMARI_SERVER="${ROLE_KOMARI_SERVER:-0}"
+  ROLE_SUBSCRIPTION_SERVER="${ROLE_SUBSCRIPTION_SERVER:-0}"
 }
 
 save_config_var() {
@@ -429,6 +443,21 @@ save_import_pair() {
     KOMARI_AUTO_DISCOVERY_KEY|KOMARI_DISCOVERY_KEY|AUTO_DISCOVERY_KEY)
       save_secret_var "KOMARI_AUTO_DISCOVERY_KEY" "$value"
       ;;
+    SUB_DOMAIN)
+      save_config_var "SUB_DOMAIN" "$value"
+      ;;
+    SUB_NAME)
+      save_config_var "SUB_NAME" "$value"
+      ;;
+    SUB_SECRET_PATH)
+      save_config_var "SUB_SECRET_PATH" "$value"
+      ;;
+    SUB_MIHOME_FILE|MIHOMO_FILE)
+      save_config_var "SUB_MIHOME_FILE" "$value"
+      ;;
+    SUB_CLASH_FILE|CLASH_FILE)
+      save_config_var "SUB_CLASH_FILE" "$value"
+      ;;
     CLOUDFLARE_TOKEN|CF_TOKEN)
       save_secret_var "CLOUDFLARE_TOKEN" "$value"
       ;;
@@ -501,6 +530,10 @@ import_all_info() {
   echo "KOMARI_ENDPOINT=探针主站地址"
   echo "KOMARI_AUTO_DISCOVERY_KEY=Komari 自动发现密钥"
   echo "KOMARI_MONTH_ROTATE=网络统计月重置日，0-31"
+  echo "SUB_DOMAIN=订阅站域名"
+  echo "SUB_SECRET_PATH=订阅随机目录，不填会自动生成"
+  echo "SUB_MIHOME_FILE=默认 dydlxxx.yaml"
+  echo "SUB_CLASH_FILE=默认 clash.yaml"
   paste_import_lines "粘贴导入"
 }
 
@@ -548,6 +581,12 @@ show_saved_info() {
   echo "- 探针主站地址：${KOMARI_ENDPOINT:-未设置}"
   echo "- 自动发现密钥：$(mask_secret "$KOMARI_AUTO_DISCOVERY_KEY")"
   echo "- 月重置日：${KOMARI_MONTH_ROTATE:-未设置}"
+  echo
+  echo "订阅站信息："
+  echo "- 订阅站域名：${SUB_DOMAIN:-未设置}"
+  echo "- 随机目录：${SUB_SECRET_PATH:-未设置}"
+  echo "- Mihomo 文件：${SUB_MIHOME_FILE:-dydlxxx.yaml}"
+  echo "- Clash 文件：${SUB_CLASH_FILE:-clash.yaml}"
   echo
   echo "当前节点信息："
   echo "- 节点名称：${NODE_NAME:-未设置}"
@@ -736,6 +775,7 @@ show_dashboard() {
   echo "远端信息"
   echo "- 主控面板：$(status_label "$PANEL_URL") $([[ -n "$PANEL_URL" ]] && echo "已配置" || echo "未配置")"
   echo "- 探针主站：$(status_label "$KOMARI_ENDPOINT") $([[ -n "$KOMARI_ENDPOINT" ]] && echo "已配置" || echo "未配置")"
+  echo "- 订阅站：$(status_label "$SUB_DOMAIN") $([[ -n "$SUB_DOMAIN" ]] && echo "已配置" || echo "未配置")"
   echo "- 橙云授权：$(status_label "$CLOUDFLARE_TOKEN") $([[ -n "$CLOUDFLARE_TOKEN" ]] && echo "已配置" || echo "未配置")"
   echo "- 管理域名：${AKVPS_ADMIN_ROOT_DOMAIN:-未设置}"
   echo "- 节点域名：${AKVPS_NODE_ROOT_DOMAIN:-未设置}"
@@ -1049,6 +1089,40 @@ EOF
 EOF
   fi
   cat >> "$tmp" <<EOF
+}
+EOF
+  install -m 0644 "$tmp" "$caddyfile"
+  rm -f "$tmp"
+  caddy fmt --overwrite "$caddyfile" >/dev/null 2>&1 || true
+  caddy validate --config "$caddyfile" >/dev/null
+  systemctl enable caddy >/dev/null 2>&1 || true
+  systemctl reload caddy 2>/dev/null || systemctl restart caddy
+}
+
+upsert_caddy_file_server() {
+  local domain="$1" root_dir="$2" caddyfile="/etc/caddy/Caddyfile" tmp
+  [[ -n "$domain" && -n "$root_dir" ]] || die "Caddy 静态站参数缺失。" "请检查域名和目录。"
+  backup_caddyfile
+  tmp="$(mktemp)"
+  if [[ -f "$caddyfile" ]]; then
+    awk -v domain="$domain" '
+      $0 ~ "^[[:space:]]*" domain "[[:space:]]*\\{" {skip=1; depth=0}
+      skip {
+        depth += gsub(/\{/, "{")
+        depth -= gsub(/\}/, "}")
+        if (depth <= 0) {skip=0}
+        next
+      }
+      {print}
+    ' "$caddyfile" > "$tmp"
+  else
+    : > "$tmp"
+  fi
+  cat >> "$tmp" <<EOF
+
+${domain} {
+  root * ${root_dir}
+  file_server
 }
 EOF
   install -m 0644 "$tmp" "$caddyfile"
@@ -3949,6 +4023,91 @@ EOF
   print_redacted_report "$KOMARI_SERVER_REPORT_PATH"
 }
 
+safe_sub_file_name() {
+  local file="$1"
+  file="${file##*/}"
+  [[ "$file" =~ ^[A-Za-z0-9._-]+[.]ya?ml$ ]] || die "订阅文件名不安全：$file" "请使用类似 dydlxxx.yaml 或 clash.yaml 的文件名。"
+  printf "%s" "$file"
+}
+
+prompt_subscription_server() {
+  info "订阅站信息"
+  ensure_admin_root_domain
+  if [[ -n "$SUB_NAME" ]]; then
+    SUB_NAME="${SUB_NAME// /}"
+    SUB_NAME="$(lower_text "$SUB_NAME")"
+  fi
+  if [[ -z "$SUB_NAME" ]]; then
+    read -r -p "请输入订阅站短名，例如 d [d]: " SUB_NAME
+    SUB_NAME="${SUB_NAME:-d}"
+    SUB_NAME="${SUB_NAME// /}"
+    SUB_NAME="$(lower_text "$SUB_NAME")"
+  fi
+  SUB_DOMAIN="${SUB_DOMAIN:-${SUB_NAME}.${AKVPS_ADMIN_ROOT_DOMAIN}}"
+  valid_domain "$SUB_DOMAIN" || die "订阅站域名格式不正确：$SUB_DOMAIN" "请检查订阅站短名或 SUB_DOMAIN。"
+  SUB_MIHOME_FILE="$(safe_sub_file_name "${SUB_MIHOME_FILE:-dydlxxx.yaml}")"
+  SUB_CLASH_FILE="$(safe_sub_file_name "${SUB_CLASH_FILE:-clash.yaml}")"
+  if [[ -z "$SUB_SECRET_PATH" ]]; then
+    SUB_SECRET_PATH="$(random_string 24)"
+  fi
+  SUB_SECRET_PATH="${SUB_SECRET_PATH#/}"
+  SUB_SECRET_PATH="${SUB_SECRET_PATH%/}"
+  [[ "$SUB_SECRET_PATH" =~ ^[A-Za-z0-9._-]{8,80}$ ]] || die "订阅随机目录不安全。" "请使用 8-80 位字母、数字、点、横线或下划线。"
+  save_config_var "SUB_NAME" "$SUB_NAME"
+  save_config_var "SUB_DOMAIN" "$SUB_DOMAIN"
+  save_config_var "SUB_SECRET_PATH" "$SUB_SECRET_PATH"
+  save_config_var "SUB_MIHOME_FILE" "$SUB_MIHOME_FILE"
+  save_config_var "SUB_CLASH_FILE" "$SUB_CLASH_FILE"
+}
+
+write_subscription_placeholder() {
+  local file="$1" label="$2"
+  [[ -f "$file" ]] && return 0
+  cat > "$file" <<EOF
+# akvps ${label} subscription placeholder
+# 后续把真实订阅内容覆盖到这个文件即可。
+proxies: []
+proxy-groups: []
+rules:
+  - MATCH,DIRECT
+EOF
+}
+
+setup_subscription_site() {
+  info "配置订阅站"
+  local dir="$AKVPS_SUB_ROOT/$SUB_SECRET_PATH"
+  install -d -m 755 "$dir"
+  write_subscription_placeholder "$dir/$SUB_MIHOME_FILE" "mihomo"
+  write_subscription_placeholder "$dir/$SUB_CLASH_FILE" "clash"
+  chmod 0644 "$dir/$SUB_MIHOME_FILE" "$dir/$SUB_CLASH_FILE"
+  upsert_caddy_file_server "$SUB_DOMAIN" "$AKVPS_SUB_ROOT"
+  echo "订阅站目录：$dir"
+}
+
+generate_subscription_report() {
+  info "生成订阅站卡片"
+  SUB_REPORT_PATH="$AKVPS_REPORT_DIR/$(date +%F-%H%M%S)-subscription-${SUB_NAME}.md"
+  local mihomo_url clash_url dir
+  dir="$AKVPS_SUB_ROOT/$SUB_SECRET_PATH"
+  mihomo_url="https://${SUB_DOMAIN}/${SUB_SECRET_PATH}/${SUB_MIHOME_FILE}"
+  clash_url="https://${SUB_DOMAIN}/${SUB_SECRET_PATH}/${SUB_CLASH_FILE}"
+  cat > "$SUB_REPORT_PATH" <<EOF
+# akvps 订阅站卡片
+
+| 项目 | 内容 |
+|---|---|
+| 订阅站域名 | ${SUB_DOMAIN} |
+| 本机目录 | ${dir} |
+| Mihomo 订阅 | ${mihomo_url} |
+| Clash 订阅 | ${clash_url} |
+
+EOF
+  chmod 600 "$SUB_REPORT_PATH"
+  ln -sf "$SUB_REPORT_PATH" "$AKVPS_LATEST_SUB_REPORT"
+  echo "卡片已保存：$SUB_REPORT_PATH"
+  cat "$SUB_REPORT_PATH"
+}
+
 self_check() {
   echo "akvps 自检"
   echo "版本：$AKVPS_VERSION"
@@ -4628,12 +4787,14 @@ one_click_deploy() {
     echo "1. 代理节点（3x-ui 节点端 + 可选探针）"
     echo "2. 3x-ui 主控（Caddy HTTPS 反代）"
     echo "3. 探针站（Komari Server + Caddy HTTPS）"
+    echo "4. 订阅站（静态订阅文件 + Caddy HTTPS）"
     echo "0. 返回"
     read -r -p "请选择: " sub
     case "$sub" in
       1) one_click_node_deploy; return ;;
       2) deploy_master_panel; return ;;
       3) deploy_komari_server; return ;;
+      4) deploy_subscription_server; return ;;
       0) return ;;
     esac
   done
@@ -4647,6 +4808,7 @@ local_deploy_menu() {
     echo "2. 探针部署"
     echo "3. 设为主控机"
     echo "4. 设为探针站"
+    echo "5. 设为订阅站"
     echo "0. 返回"
     read -r -p "请选择: " sub
     case "$sub" in
@@ -4654,6 +4816,7 @@ local_deploy_menu() {
       2) deploy_komari; pause_menu ;;
       3) deploy_master_panel; pause_menu ;;
       4) deploy_komari_server; pause_menu ;;
+      5) deploy_subscription_server; pause_menu ;;
       0) return ;;
     esac
   done
@@ -4719,6 +4882,23 @@ deploy_komari_server() {
   save_state_var "ROLE_KOMARI_SERVER" "1"
 }
 
+deploy_subscription_server() {
+  need_root
+  ensure_dirs
+  load_envs
+  check_system
+  detect_public_ips
+  prompt_subscription_server
+  prompt_cloudflare_token "$AKVPS_ADMIN_ROOT_DOMAIN"
+  install_base_tools
+  setup_panel_ufw
+  setup_dns_for_domain "$SUB_DOMAIN"
+  wait_dns_for_domain "$SUB_DOMAIN"
+  setup_subscription_site
+  generate_subscription_report
+  save_state_var "ROLE_SUBSCRIPTION_SERVER" "1"
+}
+
 show_latest_report() {
   if [[ -L "$AKVPS_LATEST_REPORT" || -f "$AKVPS_LATEST_REPORT" ]]; then
     cat "$AKVPS_LATEST_REPORT"
@@ -4765,6 +4945,14 @@ show_latest_komari_server_report() {
   fi
 }
 
+show_latest_subscription_report() {
+  if [[ -L "$AKVPS_LATEST_SUB_REPORT" || -f "$AKVPS_LATEST_SUB_REPORT" ]]; then
+    cat "$AKVPS_LATEST_SUB_REPORT"
+  else
+    echo "还没有订阅站卡片。"
+  fi
+}
+
 view_info_menu() {
   while true; do
     echo
@@ -4775,6 +4963,7 @@ view_info_menu() {
     echo "4. 主控面板卡片"
     echo "5. 探针节点卡片"
     echo "6. 探针主站卡片"
+    echo "7. 订阅站卡片"
     echo "0. 返回"
     read -r -p "请选择: " sub
     case "$sub" in
@@ -4784,6 +4973,7 @@ view_info_menu() {
       4) show_latest_panel_report; pause_menu ;;
       5) show_latest_komari_report; pause_menu ;;
       6) show_latest_komari_server_report; pause_menu ;;
+      7) show_latest_subscription_report; pause_menu ;;
       0) return ;;
     esac
   done
@@ -4907,10 +5097,12 @@ case "${1:-menu}" in
   panel|deploy-panel|local-deploy) local_deploy_menu ;;
   komari|deploy-komari) deploy_komari ;;
   komari-server|deploy-komari-server) deploy_komari_server ;;
+  subscription|subscription-server|deploy-subscription|deploy-subscription-server) deploy_subscription_server ;;
   report) show_latest_report ;;
   panel-report) show_latest_panel_report ;;
   komari-report) show_latest_komari_report ;;
   komari-server-report) show_latest_komari_server_report ;;
+  subscription-report|sub-report) show_latest_subscription_report ;;
   settings|info-settings|basic-settings) basic_settings_menu ;;
   connect-master|connect-node) connect_node_to_master ;;
   verify-master|verify-node) verify_master_connection ;;

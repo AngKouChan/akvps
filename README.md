@@ -1,8 +1,8 @@
 # Angkou-Vps 轻量版
 
-`akvps` 是在单台 VPS 内运行的中文 VPS 部署与维护工具。第一版重点做：代理节点、探针 Agent、3x-ui 主控面板、Komari 探针主站。
+`akvps` 是在单台 VPS 内运行的中文 VPS 部署与维护工具。第一版重点做：代理节点、探针 Agent、3x-ui 主控面板、Komari 探针主站、订阅站。
 
-主控面板和探针主站是两个独立角色，可以部署在同一台 VPS，也可以部署在不同 VPS。
+主控面板、探针主站和订阅站是独立角色，可以部署在同一台 VPS，也可以部署在不同 VPS。
 
 ## 安装
 
@@ -18,7 +18,7 @@ akvps
 
 菜单会逐级返回：二级菜单里的功能执行完，会留在当前二级菜单；只有选择 `0. 返回` 才回到上一级。
 
-进入菜单后会先显示本机状态，包括基础信息、主控面板、代理节点、探针 Agent、探针主站是否已配置或正在运行；本机角色只显示本机实际部署过的角色，并支持彩色显示。
+进入菜单后会先显示本机状态，包括基础信息、主控面板、代理节点、探针 Agent、探针主站、订阅站是否已配置或正在运行；本机角色只显示本机实际部署过的角色，并支持彩色显示。
 
 ## 本地检查
 
@@ -41,6 +41,7 @@ akvps
    1. 代理节点
    2. 3x-ui 主控
    3. 探针站
+   4. 订阅站
    0. 返回
 
 3. 基础设置
@@ -56,6 +57,7 @@ akvps
    2. 探针部署
    3. 设为主控机
    4. 设为探针站
+   5. 设为订阅站
    0. 返回
 
 5. 日常维护
@@ -112,6 +114,10 @@ VPS_MBPS=1000
 KOMARI_ENDPOINT=https://t.admin.example.com
 KOMARI_AUTO_DISCOVERY_KEY=Komari 自动发现密钥
 KOMARI_MONTH_ROTATE=
+SUB_DOMAIN=d.admin.example.com
+SUB_SECRET_PATH=
+SUB_MIHOME_FILE=dydlxxx.yaml
+SUB_CLASH_FILE=clash.yaml
 END
 ```
 
@@ -177,11 +183,20 @@ END
 - Komari 后端默认端口 `25774`，外部通过 Caddy 自动 HTTPS 访问。
 - 输出 Komari 主站卡片。
 
+## 订阅站做什么
+
+- 输入订阅站短名，默认生成 `d.管理根域名`。
+- 复用 Cloudflare Token，自动新增或更新 DNS，小灰云。
+- 使用 Caddy 提供静态 HTTPS 文件服务。
+- 自动创建随机目录，默认生成 `dydlxxx.yaml` 和 `clash.yaml` 两个占位订阅文件。
+- 输出 Mihomo / Clash 订阅地址；后续把真实订阅内容覆盖到 VPS 对应文件即可。
+
 ## 固定端口
 
 - 3x-ui 被控端面板：本机 `11123/tcp`，公网通过 Caddy 的 `443/tcp` 访问。
 - 3x-ui 主控面板：本机 `11123/tcp`，公网通过 Caddy 的 `443/tcp` 访问。
 - Komari 主站：外部开放 `80/tcp`、`443/tcp`，后端 `25774/tcp` 不直接开放。
+- 订阅站：外部开放 `80/tcp`、`443/tcp`，文件目录默认在 `/var/www/proxy-sub`。
 - VLESS Reality：`11789/tcp`。
 - Hysteria2：`11799/udp`。
 - Hysteria2 端口跳跃：服务端口 `11799/udp`，跳跃范围 `39999-59999/udp`。
