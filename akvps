@@ -1426,26 +1426,26 @@ pre_tune_system() {
   disable_ipv6_optional
   save_state_var "TUNING_DONE" "1"
   TUNING_DONE="1"
-  echo "部署前调优完成。后续部署不会覆盖这部分调优。"
+  echo "调优开荒完成。后续部署不会覆盖这部分调优。"
 }
 
 ensure_pre_tuned_or_offer() {
   load_envs
   if [[ "$TUNING_DONE" == "1" ]]; then
-    echo "已检测到部署前调优，跳过调优步骤。"
+    echo "已检测到调优开荒，跳过调优步骤。"
     return 0
   fi
   if [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
-    echo "提示：尚未完成部署前调优，本次将继续部署；建议之后从主菜单 1 单独执行。"
+    echo "提示：尚未完成调优开荒，本次将继续部署；建议之后从主菜单 1 单独执行。"
     return 0
   fi
-  echo "提示：尚未完成部署前调优。"
-  read -r -p "是否现在先执行部署前调优？[Y/n]: " ans
+  echo "提示：尚未完成调优开荒。"
+  read -r -p "是否现在先执行调优开荒？[Y/n]: " ans
   ans="${ans:-Y}"
   if [[ "$ans" =~ ^[Yy]$ ]]; then
     pre_tune_system
   else
-    echo "已跳过部署前调优。"
+    echo "已跳过调优开荒。"
   fi
 }
 
@@ -4767,7 +4767,7 @@ main_menu() {
     echo "Angkou-Vps 轻量版 akvps $AKVPS_VERSION"
     echo
     show_dashboard
-    echo "1. 部署前调优"
+    echo "1. 调优开荒"
     echo "2. 开始部署"
     echo "3. 基础设置"
     echo "4. 本机部署"
