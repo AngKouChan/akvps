@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.118-mvp"
+AKVPS_VERSION="0.1.119-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1379,6 +1379,10 @@ prompt_tuning() {
   esac
   save_config_var "TUNING_MODE" "$TUNING_MODE"
   save_config_var "KERNEL_MODE" "$KERNEL_MODE"
+  if [[ "$TUNING_MODE" == "bbrv3" ]] && ! xanmod_kernel_active; then
+    echo "将先安装 XanMod / BBRv3 内核。带宽和线路参数会在重启后再填写。"
+    return
+  fi
   [[ "$TUNING_MODE" == "basic" ]] && return
   read -r -p "VPS 标称 Mbps [1000]: " v
   VPS_MBPS="${v:-1000}"
@@ -4646,6 +4650,23 @@ self_check_xanmod_flow() {
 self_check_bbrv3_invocation() {
   ! grep -q "printf '66" "$0"
   grep -q 'bash "$tmp_file" -i' "$0"
+  local out old_tuning old_kernel old_config tmp_dir
+  tmp_dir="$(mktemp -d)"
+  old_tuning="$TUNING_MODE"
+  old_kernel="$KERNEL_MODE"
+  old_config="$AKVPS_CONFIG"
+  AKVPS_CONFIG="$tmp_dir/config.env"
+  xanmod_kernel_active() {
+    return 1
+  }
+  out="$(printf '4\n' | prompt_tuning)"
+  [[ "$out" == *"重启后再填写"* ]]
+  [[ "$out" != *"VPS 标称 Mbps"* ]]
+  [[ "$TUNING_MODE" == "bbrv3" ]]
+  TUNING_MODE="$old_tuning"
+  KERNEL_MODE="$old_kernel"
+  AKVPS_CONFIG="$old_config"
+  rm -rf "$tmp_dir"
   echo "BBRv3 非交互调用自检通过。"
 }
 
