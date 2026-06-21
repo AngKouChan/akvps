@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.112-mvp"
+AKVPS_VERSION="0.1.113-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -216,44 +216,35 @@ load_envs() {
 }
 
 save_config_var() {
-  local key="$1" value="$2"
-  local escaped
-  printf -v escaped "%q" "$value"
+  local key="$1" value="$2" tmp
   touch "$AKVPS_CONFIG"
-  if grep -q "^${key}=" "$AKVPS_CONFIG"; then
-    sed -i.bak "s|^${key}=.*|${key}=${escaped}|" "$AKVPS_CONFIG"
-  else
-    printf "%s=%s\n" "$key" "$escaped" >> "$AKVPS_CONFIG"
-  fi
-  rm -f "$AKVPS_CONFIG.bak"
+  tmp="$(mktemp)"
+  grep -v "^${key}=" "$AKVPS_CONFIG" > "$tmp" 2>/dev/null || true
+  printf "%s=%q\n" "$key" "$value" >> "$tmp"
+  install -m 0600 "$tmp" "$AKVPS_CONFIG"
+  rm -f "$tmp"
   chmod 600 "$AKVPS_CONFIG"
 }
 
 save_secret_var() {
-  local key="$1" value="$2"
-  local escaped
-  printf -v escaped "%q" "$value"
+  local key="$1" value="$2" tmp
   touch "$AKVPS_SECRETS"
-  if grep -q "^${key}=" "$AKVPS_SECRETS"; then
-    sed -i.bak "s|^${key}=.*|${key}=${escaped}|" "$AKVPS_SECRETS"
-  else
-    printf "%s=%s\n" "$key" "$escaped" >> "$AKVPS_SECRETS"
-  fi
-  rm -f "$AKVPS_SECRETS.bak"
+  tmp="$(mktemp)"
+  grep -v "^${key}=" "$AKVPS_SECRETS" > "$tmp" 2>/dev/null || true
+  printf "%s=%q\n" "$key" "$value" >> "$tmp"
+  install -m 0600 "$tmp" "$AKVPS_SECRETS"
+  rm -f "$tmp"
   chmod 600 "$AKVPS_SECRETS"
 }
 
 save_state_var() {
-  local key="$1" value="$2"
-  local escaped
-  printf -v escaped "%q" "$value"
+  local key="$1" value="$2" tmp
   touch "$AKVPS_STATE"
-  if grep -q "^${key}=" "$AKVPS_STATE"; then
-    sed -i.bak "s|^${key}=.*|${key}=${escaped}|" "$AKVPS_STATE"
-  else
-    printf "%s=%s\n" "$key" "$escaped" >> "$AKVPS_STATE"
-  fi
-  rm -f "$AKVPS_STATE.bak"
+  tmp="$(mktemp)"
+  grep -v "^${key}=" "$AKVPS_STATE" > "$tmp" 2>/dev/null || true
+  printf "%s=%q\n" "$key" "$value" >> "$tmp"
+  install -m 0600 "$tmp" "$AKVPS_STATE"
+  rm -f "$tmp"
   chmod 600 "$AKVPS_STATE"
 }
 
@@ -3490,6 +3481,11 @@ get_xui_api_token() {
   printf "%s" "$token"
 }
 
+reset_xui_panel_tls() {
+  [[ -x "$XUI_BIN" ]] || return 0
+  "$XUI_BIN" cert -reset >/dev/null 2>&1 || true
+}
+
 verify_local_xui_api_token() {
   local port="$1" web_base_path="$2" token="$3" public_url="${4:-}"
   local base url response status body urls=()
@@ -3565,6 +3561,7 @@ install_or_configure_xui() {
 
   [[ -x "$XUI_BIN" ]] || die "3x-ui 安装后未找到 x-ui 命令。" "请检查官方安装脚本输出。"
   "$XUI_BIN" setting -username "$XUI_USERNAME" -password "$XUI_PASSWORD" -port "$AKVPS_XUI_PORT" -webBasePath "$XUI_WEB_BASE_PATH"
+  reset_xui_panel_tls
   delete_old_api_tokens
   XUI_API_TOKEN="$(get_xui_api_token)"
   systemctl restart x-ui 2>/dev/null || true
@@ -3624,6 +3621,7 @@ install_or_configure_panel_xui() {
 
   [[ -x "$XUI_BIN" ]] || die "3x-ui 安装后未找到 x-ui 命令。" "请检查官方安装脚本输出。"
   "$XUI_BIN" setting -username "$XUI_USERNAME" -password "$XUI_PASSWORD" -port "$AKVPS_PANEL_PORT" -webBasePath "$XUI_WEB_BASE_PATH"
+  reset_xui_panel_tls
   delete_old_api_tokens
   XUI_API_TOKEN="$(get_xui_api_token)"
   systemctl restart x-ui 2>/dev/null || true
@@ -4606,7 +4604,32 @@ self_check_xui_caddy_flow() {
   grep -q 'upsert_caddy_reverse_proxy "$domain" "127.0.0.1:${port}" http 0' "$0"
   grep -q 'urls+=("${public_url}/panel/api/server/status")' "$0"
   grep -q 'url="http://127.0.0.1:${port}"' "$0"
+  grep -q 'cert -reset' "$0"
   echo "3x-ui Caddy 反代自检通过。"
+}
+
+self_check_env_save() {
+  local old_config old_secrets old_state tmp_dir loaded
+  tmp_dir="$(mktemp -d)"
+  old_config="$AKVPS_CONFIG"
+  old_secrets="$AKVPS_SECRETS"
+  old_state="$AKVPS_STATE"
+  AKVPS_CONFIG="$tmp_dir/config.env"
+  AKVPS_SECRETS="$tmp_dir/secrets.env"
+  AKVPS_STATE="$tmp_dir/state.env"
+  save_config_var "NODE_PROTOCOLS" "vless / hy2端口跳跃"
+  bash -n "$AKVPS_CONFIG"
+  loaded="$(bash -c "source '$AKVPS_CONFIG'; printf '%s' \"\$NODE_PROTOCOLS\"")"
+  [[ "$loaded" == "vless / hy2端口跳跃" ]]
+  save_config_var "NODE_PROTOCOLS" "hy2 / hy2端口跳跃"
+  bash -n "$AKVPS_CONFIG"
+  loaded="$(bash -c "source '$AKVPS_CONFIG'; printf '%s' \"\$NODE_PROTOCOLS\"")"
+  [[ "$loaded" == "hy2 / hy2端口跳跃" ]]
+  AKVPS_CONFIG="$old_config"
+  AKVPS_SECRETS="$old_secrets"
+  AKVPS_STATE="$old_state"
+  rm -rf "$tmp_dir"
+  echo "配置写入自检通过。"
 }
 
 self_check_pre_tune_skip() {
@@ -5111,6 +5134,7 @@ case "${1:-menu}" in
   check-bbrv3-flow|self-check-bbrv3-flow|check-xanmod-flow|self-check-xanmod-flow) self_check_xanmod_flow ;;
   check-bbrv3-invocation|self-check-bbrv3-invocation) self_check_bbrv3_invocation ;;
   check-xui-caddy-flow|self-check-xui-caddy-flow) self_check_xui_caddy_flow ;;
+  check-env-save|self-check-env-save) self_check_env_save ;;
   check-pre-tune-skip|self-check-pre-tune-skip) self_check_pre_tune_skip ;;
   check-package-repair|self-check-package-repair) self_check_package_repair ;;
   check-komari-month-rotate|self-check-komari-month-rotate) self_check_komari_month_rotate ;;
