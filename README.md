@@ -90,7 +90,7 @@ CLOUDFLARE_TOKEN=你的 Cloudflare Token
 MASTER_IPV4=主控 IPv4
 MASTER_IPV6=
 PANEL_DOMAIN=x.kouzho.cc
-PANEL_URL=https://x.kouzho.cc:11123/随机路径
+PANEL_URL=https://x.kouzho.cc/随机路径
 PANEL_API_TOKEN=主控 API Token
 NODE_NAME=jp1
 NODE_PROTOCOLS=vless / hy2端口跳跃
@@ -111,10 +111,10 @@ END
 - 配置 Termius 统一 SSH 公钥并禁用密码登录。
 - 按内存判断是否创建 Swap。
 - 安装必要工具并设置上海时区。
-- 默认使用稳妥调优，也可选择进阶网络调优或基础调优；调优只问 VPS 带宽、延迟和线路质量，不再询问本地上传/下载。
+- 默认使用稳妥调优，也可选择进阶网络调优、基础调优或 XanMod BBR3；XanMod BBR3 需要重启后生效。
 - 配置 UFW。
 - Cloudflare DNS 小灰云：有 IPv4 建 A，有 IPv6 建 AAAA。
-- 用 3x-ui 官方非交互脚本安装或重设远端节点端。
+- 用 3x-ui 官方非交互脚本安装或重设远端节点端，并通过 Caddy 暴露 HTTPS 面板。
 - 如果本机已经是主控面板，会直接复用主控 3x-ui，不刷新主控登录信息，也不把自己导入为远端节点。
 - 如果本机只是装过 3x-ui，会复用现有安装，避免重复安装冲突。
 - 生成本机接入报告。
@@ -125,7 +125,7 @@ END
 
 - 输入主控短名，生成 `主控短名.kouzho.cc`。
 - 复用 Cloudflare Token，自动新增或更新 DNS，小灰云。
-- 用 3x-ui 官方非交互脚本安装或重设主控面板。
+- 用 3x-ui 官方非交互脚本安装或重设主控面板，并通过 Caddy 暴露 HTTPS 面板。
 - 自动生成用户名、密码、随机访问路径和 API Token。
 - 自动保存主控域名、面板地址、API Token。
 - 输出主控面板卡片。
@@ -166,8 +166,8 @@ END
 
 ## 固定端口
 
-- 3x-ui 被控端面板：`11123/tcp`，只允许主控 IPv4 / IPv6 访问。
-- 3x-ui 主控面板：`11123/tcp`。
+- 3x-ui 被控端面板：本机 `11123/tcp`，公网通过 Caddy 的 `443/tcp` 访问。
+- 3x-ui 主控面板：本机 `11123/tcp`，公网通过 Caddy 的 `443/tcp` 访问。
 - Komari 主站：外部开放 `80/tcp`、`443/tcp`，后端 `25774/tcp` 不直接开放。
 - VLESS Reality：`11789/tcp`。
 - Hysteria2：`11799/udp`。

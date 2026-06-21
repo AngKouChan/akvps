@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.104-mvp"
+AKVPS_VERSION="0.1.105-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -54,6 +54,7 @@ SELECT_VLESS=0
 SELECT_HY2=0
 SELECT_HY2_HOP=0
 TUNING_MODE="smart"
+KERNEL_MODE="stock"
 VPS_MBPS="1000"
 RTT_MS=""
 LINE_QUALITY="1"
@@ -168,6 +169,7 @@ load_envs() {
   NODE_PROTOCOLS="${NODE_PROTOCOLS:-}"
   XUI_WEB_BASE_PATH="${XUI_WEB_BASE_PATH:-}"
   TUNING_MODE="${TUNING_MODE:-smart}"
+  KERNEL_MODE="${KERNEL_MODE:-stock}"
   VPS_MBPS="${VPS_MBPS:-1000}"
   RTT_MS="${RTT_MS:-}"
   LINE_QUALITY="${LINE_QUALITY:-1}"
@@ -905,8 +907,62 @@ install_packages() {
 
 install_base_tools() {
   info "安装必要工具"
-  install_packages curl ca-certificates ufw jq unzip tar cron openssl sqlite3 iproute2 iptables libc-bin
+  install_packages curl ca-certificates ufw jq unzip tar cron openssl sqlite3 iproute2 iptables libc-bin caddy
   timedatectl set-timezone Asia/Shanghai || true
+}
+
+backup_caddyfile() {
+  local caddyfile="/etc/caddy/Caddyfile"
+  mkdir -p /etc/caddy
+  [[ -f "$caddyfile" ]] && cp -a "$caddyfile" "${caddyfile}.bak.akvps.$(date +%F-%H%M%S)" || true
+}
+
+upsert_caddy_reverse_proxy() {
+  local domain="$1" upstream="$2" scheme="${3:-http}" insecure_skip="${4:-0}" caddyfile="/etc/caddy/Caddyfile" tmp
+  [[ -n "$domain" && -n "$upstream" ]] || die "Caddy 反代参数缺失。" "请检查域名和本机端口。"
+  [[ "$scheme" == "http" || "$scheme" == "https" ]] || die "Caddy 反代协议不支持：$scheme" "请使用 http 或 https。"
+  backup_caddyfile
+  tmp="$(mktemp)"
+  if [[ -f "$caddyfile" ]]; then
+    awk -v domain="$domain" '
+      $0 ~ "^[[:space:]]*" domain "[[:space:]]*\\{" {skip=1; depth=0}
+      skip {
+        depth += gsub(/\{/, "{")
+        depth -= gsub(/\}/, "}")
+        if (depth <= 0) {skip=0}
+        next
+      }
+      {print}
+    ' "$caddyfile" > "$tmp"
+  else
+    : > "$tmp"
+  fi
+  cat >> "$tmp" <<EOF
+
+${domain} {
+EOF
+  if [[ "$scheme" == "https" && "$insecure_skip" == "1" ]]; then
+    cat >> "$tmp" <<EOF
+  reverse_proxy https://${upstream} {
+    transport http {
+      tls_insecure_skip_verify
+    }
+  }
+EOF
+  else
+    cat >> "$tmp" <<EOF
+  reverse_proxy ${scheme}://${upstream}
+EOF
+  fi
+  cat >> "$tmp" <<EOF
+}
+EOF
+  install -m 0644 "$tmp" "$caddyfile"
+  rm -f "$tmp"
+  caddy fmt --overwrite "$caddyfile" >/dev/null 2>&1 || true
+  caddy validate --config "$caddyfile" >/dev/null
+  systemctl enable caddy >/dev/null 2>&1 || true
+  systemctl reload caddy 2>/dev/null || systemctl restart caddy
 }
 
 install_light_tools() {
@@ -1133,14 +1189,17 @@ prompt_tuning() {
   echo "1. 稳妥调优（推荐）"
   echo "2. 进阶网络调优"
   echo "3. 基础调优"
+  echo "4. XanMod BBR3（需要重启，进阶）"
   read -r -p "请选择 [1]: " ans
   ans="${ans:-1}"
   case "$ans" in
     2) TUNING_MODE="advanced" ;;
     3) TUNING_MODE="basic" ;;
+    4) TUNING_MODE="xanmod-bbr3"; KERNEL_MODE="xanmod-bbr3" ;;
     *) TUNING_MODE="smart" ;;
   esac
   save_config_var "TUNING_MODE" "$TUNING_MODE"
+  save_config_var "KERNEL_MODE" "$KERNEL_MODE"
   [[ "$TUNING_MODE" == "basic" ]] && return
   read -r -p "VPS 标称 Mbps [1000]: " v
   VPS_MBPS="${v:-1000}"
@@ -1160,6 +1219,9 @@ prompt_tuning() {
 
 apply_tuning() {
   info "应用系统调优"
+  if [[ "$KERNEL_MODE" == "xanmod-bbr3" || "$TUNING_MODE" == "xanmod-bbr3" ]]; then
+    install_xanmod_bbr3
+  fi
   [[ -f "$AKVPS_SYSCTL" ]] && cp -a "$AKVPS_SYSCTL" "$AKVPS_SYSCTL.bak.$(date +%F-%H%M%S)"
   sed -i '/^net\.ipv4\.tcp_adv_win_scale[[:space:]]*=/d' "$AKVPS_SYSCTL" "$AKVPS_SYSCTL".bak.* 2>/dev/null || true
   local mem_kb mem_mb tcp_mem udp_mem rmem_max wmem_max somaxconn backlog syn_backlog notsent_lowat
@@ -1246,6 +1308,29 @@ EOF
   sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc
 }
 
+install_xanmod_bbr3() {
+  info "安装 XanMod BBR3 内核"
+  # 官方 XanMod 仓库会按发行版提供内核包；安装后需重启才会真正切换内核。
+  case "$(uname -m 2>/dev/null || true)" in
+    x86_64|amd64) ;;
+    *) die "XanMod BBR3 当前只自动支持 x86_64 VPS。" "ARM VPS 请先用默认 BBR+FQ。" ;;
+  esac
+  command -v wget >/dev/null 2>&1 || install_packages wget
+  command -v gpg >/dev/null 2>&1 || install_packages gnupg
+  if [[ ! -f /etc/apt/sources.list.d/xanmod-release.list ]]; then
+    local codename
+    codename="$(. /etc/os-release 2>/dev/null; printf "%s" "${VERSION_CODENAME:-}")"
+    [[ -n "$codename" ]] || codename="$(lsb_release -sc 2>/dev/null || true)"
+    [[ -n "$codename" ]] || die "无法识别系统代号，暂不能自动添加 XanMod 源。" "请先用默认 BBR+FQ。"
+    mkdir -p /etc/apt/keyrings
+    wget -qO - https://dl.xanmod.org/archive.key | gpg --dearmor -o /etc/apt/keyrings/xanmod-archive-keyring.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org ${codename} main" > /etc/apt/sources.list.d/xanmod-release.list
+  fi
+  install_packages linux-xanmod-x64v3 || install_packages linux-xanmod-x64v2 || install_packages linux-xanmod
+  save_config_var "KERNEL_MODE" "xanmod-bbr3"
+  echo "XanMod 已安装。请在本轮部署完成后重启 VPS，再运行：sysctl net.ipv4.tcp_congestion_control"
+}
+
 setup_ufw() {
   info "配置 UFW"
   local ssh_port
@@ -1256,10 +1341,6 @@ setup_ufw() {
   ufw allow "$ssh_port/tcp" comment "ssh"
   ufw allow 80/tcp comment "acme"
   ufw allow 443/tcp comment "https"
-  ufw allow from "$MASTER_IPV4" to any port "$AKVPS_XUI_PORT" proto tcp comment "akvps x-ui master"
-  if [[ -n "$MASTER_IPV6" ]]; then
-    ufw allow from "$MASTER_IPV6" to any port "$AKVPS_XUI_PORT" proto tcp comment "akvps x-ui master ipv6"
-  fi
   if [[ "$SELECT_VLESS" -eq 1 ]]; then
     ufw allow "$AKVPS_VLESS_PORT/tcp" comment "vless reality"
   fi
@@ -1334,7 +1415,6 @@ setup_panel_ufw() {
   ufw allow "$ssh_port/tcp" comment "ssh"
   ufw allow 80/tcp comment "acme"
   ufw allow 443/tcp comment "https"
-  ufw allow "$AKVPS_PANEL_PORT/tcp" comment "3x-ui panel"
   ufw --force enable
   ufw reload
 }
@@ -1595,7 +1675,8 @@ url_host_from_url() {
 }
 
 url_port_from_url() {
-  local url="$1" hostport port
+  local url="$1" scheme hostport port
+  scheme="${url%%://*}"
   hostport="${url#*://}"
   hostport="${hostport%%/*}"
   if [[ "$hostport" == *:* && "$hostport" != \[* ]]; then
@@ -1605,6 +1686,10 @@ url_port_from_url() {
   fi
   if [[ "$port" =~ ^[0-9]+$ ]]; then
     printf "%s" "$port"
+  elif [[ "$scheme" == "https" ]]; then
+    printf "443"
+  elif [[ "$scheme" == "http" ]]; then
+    printf "80"
   else
     printf "%s" "$AKVPS_XUI_PORT"
   fi
@@ -3043,7 +3128,7 @@ connect_node_to_master() {
     sleep 1
   done
   printf "\r%*s\r" 80 ""
-  [[ "$status" == "online" && "$xray_state" != "failed" && "$xray_state" != "error" ]] || die "主控未确认节点和 Xray 正常。" "请检查节点域名、11123 端口、节点 API Token、Xray 状态。主控返回：${msg:-unknown}"
+  [[ "$status" == "online" && "$xray_state" != "failed" && "$xray_state" != "error" ]] || die "主控未确认节点和 Xray 正常。" "请检查节点域名、443 反代、节点 API Token、Xray 状态。主控返回：${msg:-unknown}"
   payload="$(node_tls_payload)"
 
   info "接入主控面板"
@@ -3191,7 +3276,8 @@ install_or_configure_xui() {
   delete_old_api_tokens
   XUI_API_TOKEN="$(get_xui_api_token)"
   systemctl restart x-ui 2>/dev/null || true
-  XUI_ACCESS_URL="https://${NODE_DOMAIN}:${AKVPS_XUI_PORT}/${XUI_WEB_BASE_PATH}"
+  setup_xui_caddy "$NODE_DOMAIN" "$AKVPS_XUI_PORT"
+  XUI_ACCESS_URL="https://${NODE_DOMAIN}/${XUI_WEB_BASE_PATH}"
   verify_local_xui_api_token "$AKVPS_XUI_PORT" "$XUI_WEB_BASE_PATH" "$XUI_API_TOKEN" \
     || die "3x-ui API Token 已生成，但本机验证未通过。" "请检查 3x-ui 服务状态、面板端口和基础路径。"
   save_config_var "NODE_NAME" "$NODE_NAME"
@@ -3200,6 +3286,13 @@ install_or_configure_xui() {
   save_config_var "XUI_WEB_BASE_PATH" "$XUI_WEB_BASE_PATH"
   save_secret_var "NODE_XUI_API_TOKEN" "$XUI_API_TOKEN"
   curl -kfsS --max-time 10 "https://127.0.0.1:${AKVPS_XUI_PORT}/${XUI_WEB_BASE_PATH}" >/dev/null 2>&1 || true
+}
+
+setup_xui_caddy() {
+  local domain="$1" port="$2"
+  info "配置 3x-ui HTTPS 反代"
+  upsert_caddy_reverse_proxy "$domain" "127.0.0.1:${port}" https 1
+  echo "3x-ui 面板已通过 Caddy 暴露：https://${domain}/${XUI_WEB_BASE_PATH}"
 }
 
 prompt_panel() {
@@ -3240,7 +3333,8 @@ install_or_configure_panel_xui() {
   delete_old_api_tokens
   XUI_API_TOKEN="$(get_xui_api_token)"
   systemctl restart x-ui 2>/dev/null || true
-  XUI_ACCESS_URL="https://${PANEL_DOMAIN}:${AKVPS_PANEL_PORT}/${XUI_WEB_BASE_PATH}"
+  setup_xui_caddy "$PANEL_DOMAIN" "$AKVPS_PANEL_PORT"
+  XUI_ACCESS_URL="https://${PANEL_DOMAIN}/${XUI_WEB_BASE_PATH}"
   verify_local_xui_api_token "$AKVPS_PANEL_PORT" "$XUI_WEB_BASE_PATH" "$XUI_API_TOKEN" \
     || die "3x-ui API Token 已生成，但本机验证未通过。" "请检查 3x-ui 服务状态、面板端口和基础路径。"
   save_config_var "PANEL_DOMAIN" "$PANEL_DOMAIN"
@@ -3341,7 +3435,7 @@ generate_report() {
 | 备注 | ${NODE_NAME} |
 | 协议 | https |
 | 地址 | ${NODE_DOMAIN} |
-| 端口 | ${AKVPS_XUI_PORT} |
+| 端口 | 443 |
 | 基础路径 | /${XUI_WEB_BASE_PATH}/ |
 | API Token | ${XUI_API_TOKEN} |
 | TLS 校验 | skip |
@@ -3377,6 +3471,7 @@ ${proto_lines}
 | BBR/FQ | ${bbr} / ${qdisc} |
 | 3x-ui 服务 | ${status_xui} |
 | HTTPS 地址 | ${XUI_ACCESS_URL} |
+| 面板暴露方式 | Caddy 反代到本机 https://127.0.0.1:${AKVPS_XUI_PORT} |
 | 用户名 | ${XUI_USERNAME} |
 | 密码 | ${XUI_PASSWORD} |
 
@@ -3417,7 +3512,7 @@ generate_panel_report() {
 | DNS | ${status_dns} |
 | 3x-ui 服务 | ${status_xui} |
 | UFW | ${status_ufw} |
-| HTTPS | 已按 3x-ui 官方脚本配置 |
+| HTTPS | Caddy 反代到本机 https://127.0.0.1:${AKVPS_PANEL_PORT} |
 
 ## 三、后续
 
@@ -3586,15 +3681,7 @@ install_komari_server() {
 setup_komari_caddy() {
   info "配置 Komari HTTPS"
   local second max_wait=60
-  mkdir -p /etc/caddy
-  cat > /etc/caddy/Caddyfile <<EOF
-${KOMARI_SERVER_DOMAIN} {
-  reverse_proxy 127.0.0.1:${AKVPS_KOMARI_PORT}
-}
-EOF
-  caddy validate --config /etc/caddy/Caddyfile >/dev/null
-  systemctl enable caddy >/dev/null 2>&1 || true
-  systemctl restart caddy
+  upsert_caddy_reverse_proxy "$KOMARI_SERVER_DOMAIN" "127.0.0.1:${AKVPS_KOMARI_PORT}" http 0
   for second in $(seq 1 "$max_wait"); do
     if curl -fsS --max-time 10 "https://${KOMARI_SERVER_DOMAIN}" >/dev/null 2>&1; then
       printf "\r%*s\r" 80 ""
@@ -3658,9 +3745,9 @@ self_check() {
   echo "命令检查："
   for cmd in bash curl awk sed grep openssl; do
     if command -v "$cmd" >/dev/null 2>&1; then
-      echo "- $cmd：存在"
+      echo "- ${cmd}：存在"
     else
-      echo "- $cmd：缺失"
+      echo "- ${cmd}：缺失"
     fi
   done
   echo
@@ -3683,7 +3770,7 @@ self_check_inbounds() {
   local vless hy2 hy2hop
   [[ "$(normalize_panel_url "https://example.com/base/panel/")" == "https://example.com/base" ]]
   [[ "$(node_base_path_from_url "https://example.com/base/panel/")" == "/base/" ]]
-  [[ "$(url_port_from_url "https://example.com/base/panel/")" == "$AKVPS_XUI_PORT" ]]
+  [[ "$(url_port_from_url "https://example.com/base/panel/")" == "443" ]]
   [[ "$(url_port_from_url "https://example.com:2053/base/panel/")" == "2053" ]]
   PANEL_URL="https://example.com/base/panel/"
   [[ "$(api_base_from_panel_url)" == "https://example.com/base/panel/api" ]]
@@ -4243,7 +4330,7 @@ one_click_node_deploy() {
   ensure_dirs
   AKVPS_AUTO_DEPLOY=1
   info "一键部署代理节点"
-  echo "流程：信息注入 -> 代理节点 -> 探针节点 -> 极简报告"
+  echo "流程：信息注入 -> 代理节点 -> Caddy 反代面板 -> 可选探针 -> 极简报告"
   echo
   import_all_info
   load_envs
@@ -4265,9 +4352,9 @@ one_click_deploy() {
     echo
     echo "一键部署"
     echo "这台 VPS 准备做什么？"
-    echo "1. 代理节点"
-    echo "2. 3x-ui 主控"
-    echo "3. 探针站"
+    echo "1. 代理节点（3x-ui 节点端 + 可选探针）"
+    echo "2. 3x-ui 主控（Caddy HTTPS 反代）"
+    echo "3. 探针站（Komari Server + Caddy HTTPS）"
     echo "0. 返回"
     read -r -p "请选择: " sub
     case "$sub" in
