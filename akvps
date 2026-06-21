@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.116-mvp"
+AKVPS_VERSION="0.1.117-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -1008,11 +1008,30 @@ prompt_protocols() {
 }
 
 apt_update_safe() {
+  wait_for_package_manager
   apt-get update --allow-releaseinfo-change || apt-get update
+}
+
+wait_for_package_manager() {
+  local second max_wait=300 lock_holder=""
+  for second in $(seq 1 "$max_wait"); do
+    lock_holder="$(fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null || true)"
+    if [[ -z "$lock_holder" ]]; then
+      return 0
+    fi
+    if [[ "$second" -eq 1 ]]; then
+      echo "检测到系统正在后台安装/更新软件，等待它结束。"
+    fi
+    printf "\r等待 apt/dpkg 锁释放... %3d/%d 秒" "$second" "$max_wait"
+    sleep 1
+  done
+  printf "\r%*s\r" 80 ""
+  die "系统软件安装锁一直未释放。" "请稍等几分钟后重新运行 akvps；不要手动删除 lock 文件。"
 }
 
 repair_dpkg_state() {
   command -v dpkg >/dev/null 2>&1 || return 0
+  wait_for_package_manager
   if dpkg --audit 2>/dev/null | grep -q .; then
     echo "检测到上次软件安装未完成，正在自动修复。"
     DEBIAN_FRONTEND=noninteractive dpkg --configure -a
@@ -4702,7 +4721,11 @@ EOF
 echo "apt-get $*" >>"$AKVPS_TEST_CALLS"
 exit 0
 EOF
-  chmod +x "$tmp_dir/dpkg" "$tmp_dir/apt-get"
+  cat >"$tmp_dir/fuser" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+  chmod +x "$tmp_dir/dpkg" "$tmp_dir/apt-get" "$tmp_dir/fuser"
   AKVPS_TEST_CALLS="$tmp_dir/calls"
   export AKVPS_TEST_CALLS
   install_packages curl ca-certificates >/dev/null
