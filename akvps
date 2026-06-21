@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.113-mvp"
+AKVPS_VERSION="0.1.114-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -3579,8 +3579,18 @@ install_or_configure_xui() {
 
 setup_xui_caddy() {
   local domain="$1" port="$2"
+  local scheme="http" insecure_skip="0" http_code https_code
   info "配置 3x-ui HTTPS 反代"
-  upsert_caddy_reverse_proxy "$domain" "127.0.0.1:${port}" http 0
+  http_code="$(curl -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${port}/" 2>/dev/null || true)"
+  if [[ "$http_code" == "000" || -z "$http_code" ]]; then
+    https_code="$(curl -ksS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "https://127.0.0.1:${port}/" 2>/dev/null || true)"
+    if [[ "$https_code" != "000" && -n "$https_code" ]]; then
+      scheme="https"
+      insecure_skip="1"
+    fi
+  fi
+  upsert_caddy_reverse_proxy "$domain" "127.0.0.1:${port}" "$scheme" "$insecure_skip"
+  echo "3x-ui 本机上游：${scheme}://127.0.0.1:${port}"
   echo "3x-ui 面板已通过 Caddy 暴露：https://${domain}/${XUI_WEB_BASE_PATH}"
 }
 
@@ -4601,7 +4611,8 @@ self_check_bbrv3_invocation() {
 }
 
 self_check_xui_caddy_flow() {
-  grep -q 'upsert_caddy_reverse_proxy "$domain" "127.0.0.1:${port}" http 0' "$0"
+  grep -q 'scheme="https"' "$0"
+  grep -q 'upsert_caddy_reverse_proxy "$domain" "127.0.0.1:${port}" "$scheme" "$insecure_skip"' "$0"
   grep -q 'urls+=("${public_url}/panel/api/server/status")' "$0"
   grep -q 'url="http://127.0.0.1:${port}"' "$0"
   grep -q 'cert -reset' "$0"
