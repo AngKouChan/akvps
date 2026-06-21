@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.114-mvp"
+AKVPS_VERSION="0.1.115-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -2325,37 +2325,44 @@ local_xui_web_base_path() {
   printf "%s" "$base"
 }
 
-local_xui_api_base() {
+local_xui_api_bases() {
   local base
   base="$(local_xui_web_base_path)"
   [[ -n "$base" ]] || return 1
-  printf "https://127.0.0.1:%s/%s/panel/api" "$AKVPS_XUI_PORT" "$base"
+  printf "https://127.0.0.1:%s/%s/panel/api\n" "$AKVPS_XUI_PORT" "$base"
+  printf "http://127.0.0.1:%s/%s/panel/api\n" "$AKVPS_XUI_PORT" "$base"
 }
 
 local_xui_api() {
   local method="$1" path="$2" data="${3:-}"
-  local api_base response status body
-  api_base="$(local_xui_api_base)" || return 1
-  if [[ -n "$data" ]]; then
-    response="$(curl -ksS -X "$method" "${api_base}${path}" \
-      -H "Authorization: Bearer ${NODE_XUI_API_TOKEN}" \
-      -H "Content-Type: application/json" \
-      -H "X-Requested-With: XMLHttpRequest" \
-      --data "$data" \
-      -w $'\n%{http_code}' 2>/dev/null || true)"
-  else
-    response="$(curl -ksS -X "$method" "${api_base}${path}" \
-      -H "Authorization: Bearer ${NODE_XUI_API_TOKEN}" \
-      -H "Content-Type: application/json" \
-      -H "X-Requested-With: XMLHttpRequest" \
-      -w $'\n%{http_code}' 2>/dev/null || true)"
-  fi
-  status="$(printf "%s" "$response" | tail -n 1)"
-  body="$(printf "%s" "$response" | sed '$d')"
-  if [[ "$status" =~ ^2[0-9][0-9]$ ]]; then
-    printf "%s" "$body"
-    return 0
-  fi
+  local api_base response status body last_status last_body
+  while IFS= read -r api_base; do
+    [[ -n "$api_base" ]] || continue
+    if [[ -n "$data" ]]; then
+      response="$(curl -ksS -X "$method" "${api_base}${path}" \
+        -H "Authorization: Bearer ${NODE_XUI_API_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -H "X-Requested-With: XMLHttpRequest" \
+        --data "$data" \
+        -w $'\n%{http_code}' 2>/dev/null || true)"
+    else
+      response="$(curl -ksS -X "$method" "${api_base}${path}" \
+        -H "Authorization: Bearer ${NODE_XUI_API_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -H "X-Requested-With: XMLHttpRequest" \
+        -w $'\n%{http_code}' 2>/dev/null || true)"
+    fi
+    status="$(printf "%s" "$response" | tail -n 1)"
+    body="$(printf "%s" "$response" | sed '$d')"
+    last_status="$status"
+    last_body="$body"
+    if [[ "$status" =~ ^2[0-9][0-9]$ ]]; then
+      printf "%s" "$body"
+      return 0
+    fi
+  done < <(local_xui_api_bases)
+  status="$last_status"
+  body="$last_body"
   echo "本机节点 API 返回 HTTP ${status:-unknown}。" >&2
   [[ -n "$body" ]] && echo "本机返回：$(printf "%s" "$body" | tr '\n' ' ' | head -c 160)" >&2
   return 1
