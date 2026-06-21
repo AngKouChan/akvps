@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.108-mvp"
+AKVPS_VERSION="0.1.109-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -16,7 +16,9 @@ AKVPS_SSHD_CONF="/etc/ssh/sshd_config.d/99-akvps-key-only.conf"
 AKVPS_HY2_HOP_REDIRECT="/usr/local/sbin/akvps-hy2-hop-redirect"
 AKVPS_HY2_HOP_SERVICE="/etc/systemd/system/akvps-hy2-hop.service"
 AKVPS_BBRV3_SCRIPT_URL="https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/refs/heads/main/net-tcp-tune.sh"
-AKVPS_ROOT_DOMAIN="kouzho.cc"
+AKVPS_ADMIN_ROOT_DOMAIN=""
+AKVPS_NODE_ROOT_DOMAIN=""
+AKVPS_ROOT_DOMAIN=""
 AKVPS_XUI_PORT="11123"
 AKVPS_PANEL_PORT="11123"
 AKVPS_KOMARI_PORT="25774"
@@ -159,7 +161,15 @@ load_envs() {
   [[ -r "$AKVPS_STATE" ]] && source "$AKVPS_STATE" || true
   [[ -r "$AKVPS_CONFIG" ]] && source "$AKVPS_CONFIG" || true
   [[ -r "$AKVPS_SECRETS" ]] && source "$AKVPS_SECRETS" || true
-  AKVPS_ROOT_DOMAIN="${AKVPS_ROOT_DOMAIN:-kouzho.cc}"
+  AKVPS_ADMIN_ROOT_DOMAIN="${AKVPS_ADMIN_ROOT_DOMAIN:-}"
+  AKVPS_NODE_ROOT_DOMAIN="${AKVPS_NODE_ROOT_DOMAIN:-}"
+  AKVPS_ROOT_DOMAIN="${AKVPS_ROOT_DOMAIN:-}"
+  if [[ -z "$AKVPS_NODE_ROOT_DOMAIN" && -n "$AKVPS_ROOT_DOMAIN" ]]; then
+    AKVPS_NODE_ROOT_DOMAIN="$AKVPS_ROOT_DOMAIN"
+  fi
+  if [[ -z "$AKVPS_ADMIN_ROOT_DOMAIN" && -n "$AKVPS_ROOT_DOMAIN" ]]; then
+    AKVPS_ADMIN_ROOT_DOMAIN="$AKVPS_ROOT_DOMAIN"
+  fi
   MASTER_IPV4="${MASTER_IPV4:-}"
   MASTER_IPV6="${MASTER_IPV6:-}"
   CLOUDFLARE_TOKEN="${CLOUDFLARE_TOKEN:-}"
@@ -289,7 +299,6 @@ prompt_config() {
   if [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
     [[ -n "$MASTER_IPV4" && "$MASTER_IPV4" != "未设置" && "$MASTER_IPV4" != "留空" ]] || die "缺少主控 IPv4。" "请在一键导入里填写 MASTER_IPV4。"
     valid_ipv4 "$MASTER_IPV4" || die "主控 IPv4 格式不正确：$MASTER_IPV4" "请检查一键导入里的 MASTER_IPV4。"
-    prompt_cloudflare_token
     return
   fi
   while [[ -z "$MASTER_IPV4" ]] || ! valid_ipv4 "$MASTER_IPV4"; do
@@ -302,7 +311,42 @@ prompt_config() {
     MASTER_IPV6="$MASTER_IPV6_INPUT"
     save_config_var "MASTER_IPV6" "$MASTER_IPV6"
   fi
-  prompt_cloudflare_token
+}
+
+ensure_node_root_domain() {
+  load_envs
+  if [[ -n "$AKVPS_NODE_ROOT_DOMAIN" ]]; then
+    return 0
+  fi
+  if [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
+    die "缺少节点根域名。" "请在一键导入里填写 AKVPS_NODE_ROOT_DOMAIN。"
+  fi
+  while true; do
+    read -r -p "请输入节点根域名，例如 node.example.com: " AKVPS_NODE_ROOT_DOMAIN
+    AKVPS_NODE_ROOT_DOMAIN="${AKVPS_NODE_ROOT_DOMAIN// /}"
+    AKVPS_NODE_ROOT_DOMAIN="$(lower_text "$AKVPS_NODE_ROOT_DOMAIN")"
+    valid_domain "$AKVPS_NODE_ROOT_DOMAIN" && break
+    echo "节点根域名格式不正确，请重新输入。"
+  done
+  save_config_var "AKVPS_NODE_ROOT_DOMAIN" "$AKVPS_NODE_ROOT_DOMAIN"
+}
+
+ensure_admin_root_domain() {
+  load_envs
+  if [[ -n "$AKVPS_ADMIN_ROOT_DOMAIN" ]]; then
+    return 0
+  fi
+  if [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
+    die "缺少管理根域名。" "请在一键导入里填写 AKVPS_ADMIN_ROOT_DOMAIN。"
+  fi
+  while true; do
+    read -r -p "请输入管理根域名，例如 admin.example.com: " AKVPS_ADMIN_ROOT_DOMAIN
+    AKVPS_ADMIN_ROOT_DOMAIN="${AKVPS_ADMIN_ROOT_DOMAIN// /}"
+    AKVPS_ADMIN_ROOT_DOMAIN="$(lower_text "$AKVPS_ADMIN_ROOT_DOMAIN")"
+    valid_domain "$AKVPS_ADMIN_ROOT_DOMAIN" && break
+    echo "管理根域名格式不正确，请重新输入。"
+  done
+  save_config_var "AKVPS_ADMIN_ROOT_DOMAIN" "$AKVPS_ADMIN_ROOT_DOMAIN"
 }
 
 trim_value() {
@@ -322,8 +366,15 @@ save_import_pair() {
   value="$(trim_value "$value")"
   [[ -n "$key" && -n "$value" ]] || return 0
   case "$key" in
+    AKVPS_ADMIN_ROOT_DOMAIN|ADMIN_ROOT_DOMAIN|ADMIN_DOMAIN)
+      save_config_var "AKVPS_ADMIN_ROOT_DOMAIN" "$value"
+      ;;
+    AKVPS_NODE_ROOT_DOMAIN|NODE_ROOT_DOMAIN|NODE_DOMAIN_ROOT)
+      save_config_var "AKVPS_NODE_ROOT_DOMAIN" "$value"
+      ;;
     AKVPS_ROOT_DOMAIN|ROOT_DOMAIN)
-      save_config_var "AKVPS_ROOT_DOMAIN" "$value"
+      save_config_var "AKVPS_ADMIN_ROOT_DOMAIN" "$value"
+      save_config_var "AKVPS_NODE_ROOT_DOMAIN" "$value"
       ;;
     MASTER_IPV4|MASTER_IP|MASTER)
       save_config_var "MASTER_IPV4" "$value"
@@ -424,7 +475,8 @@ import_basic_info() {
   echo "MASTER_IPV4=主控IPv4"
   echo "MASTER_IPV6=主控IPv6，没有可不填"
   echo "CLOUDFLARE_TOKEN=Cloudflare Token"
-  echo "AKVPS_ROOT_DOMAIN=根域名"
+  echo "AKVPS_ADMIN_ROOT_DOMAIN=管理根域名，例如 example-admin.com"
+  echo "AKVPS_NODE_ROOT_DOMAIN=节点根域名，例如 example-node.com"
   paste_import_lines "粘贴导入"
 }
 
@@ -433,7 +485,8 @@ import_all_info() {
   ensure_dirs
   info "一键导入"
   echo "可用字段："
-  echo "AKVPS_ROOT_DOMAIN=根域名"
+  echo "AKVPS_ADMIN_ROOT_DOMAIN=管理根域名，例如 example-admin.com"
+  echo "AKVPS_NODE_ROOT_DOMAIN=节点根域名，例如 example-node.com"
   echo "CLOUDFLARE_TOKEN=Cloudflare Token"
   echo "MASTER_IPV4=主控IPv4"
   echo "MASTER_IPV6=主控IPv6，没有可不填"
@@ -468,7 +521,7 @@ import_komari_info() {
   info "探针信息"
   echo "可用字段："
   echo "KOMARI_SERVER_DOMAIN=探针主站域名"
-  echo "KOMARI_ENDPOINT=探针主站地址，例如 https://status.kouzho.cc"
+  echo "KOMARI_ENDPOINT=探针主站地址，例如 https://t.example-admin.com"
   echo "KOMARI_AUTO_DISCOVERY_KEY=Komari 自动发现密钥"
   paste_import_lines "粘贴导入"
 }
@@ -479,7 +532,8 @@ show_saved_info() {
   load_envs
   info "当前信息"
   echo "基础信息："
-  echo "- 根域名：$AKVPS_ROOT_DOMAIN"
+  echo "- 管理根域名：${AKVPS_ADMIN_ROOT_DOMAIN:-未设置}"
+  echo "- 节点根域名：${AKVPS_NODE_ROOT_DOMAIN:-未设置}"
   echo "- 主控 IPv4：${MASTER_IPV4:-未设置}"
   echo "- 主控 IPv6：${MASTER_IPV6:-未设置}"
   echo "- Cloudflare Token：$(mask_secret "$CLOUDFLARE_TOKEN")"
@@ -683,7 +737,8 @@ show_dashboard() {
   echo "- 主控面板：$(status_label "$PANEL_URL") $([[ -n "$PANEL_URL" ]] && echo "已配置" || echo "未配置")"
   echo "- 探针主站：$(status_label "$KOMARI_ENDPOINT") $([[ -n "$KOMARI_ENDPOINT" ]] && echo "已配置" || echo "未配置")"
   echo "- 橙云授权：$(status_label "$CLOUDFLARE_TOKEN") $([[ -n "$CLOUDFLARE_TOKEN" ]] && echo "已配置" || echo "未配置")"
-  echo "- 使用域名：$AKVPS_ROOT_DOMAIN"
+  echo "- 管理域名：${AKVPS_ADMIN_ROOT_DOMAIN:-未设置}"
+  echo "- 节点域名：${AKVPS_NODE_ROOT_DOMAIN:-未设置}"
   echo
   echo "────────────────────────"
   echo
@@ -705,7 +760,8 @@ show_dashboard() {
 }
 
 prompt_cloudflare_token() {
-  if [[ -n "$CLOUDFLARE_TOKEN" ]] && cloudflare_token_ok; then
+  local root_domain="${1:-}"
+  if [[ -n "$CLOUDFLARE_TOKEN" ]] && cloudflare_token_ok "$root_domain"; then
     echo "Cloudflare Token 可用。"
     return
   fi
@@ -716,7 +772,7 @@ prompt_cloudflare_token() {
     read -r -s -p "请输入 Cloudflare Token: " CLOUDFLARE_TOKEN
     echo
     [[ -n "$CLOUDFLARE_TOKEN" ]] || continue
-    if cloudflare_token_ok; then
+    if cloudflare_token_ok "$root_domain"; then
       save_secret_var "CLOUDFLARE_TOKEN" "$CLOUDFLARE_TOKEN"
       break
     fi
@@ -739,8 +795,22 @@ cloudflare_api() {
 }
 
 cloudflare_token_ok() {
+  local root_domain="${1:-}"
   [[ -n "$CLOUDFLARE_TOKEN" ]] || return 1
-  cloudflare_api GET "zones?name=$AKVPS_ROOT_DOMAIN" >/dev/null 2>&1
+  if [[ -n "$root_domain" ]]; then
+    cloudflare_api GET "zones?name=$root_domain" >/dev/null 2>&1
+    return
+  fi
+  local checked=0
+  if [[ -n "$AKVPS_NODE_ROOT_DOMAIN" ]]; then
+    cloudflare_api GET "zones?name=$AKVPS_NODE_ROOT_DOMAIN" >/dev/null 2>&1 || return 1
+    checked=1
+  fi
+  if [[ -n "$AKVPS_ADMIN_ROOT_DOMAIN" && "$AKVPS_ADMIN_ROOT_DOMAIN" != "$AKVPS_NODE_ROOT_DOMAIN" ]]; then
+    cloudflare_api GET "zones?name=$AKVPS_ADMIN_ROOT_DOMAIN" >/dev/null 2>&1 || return 1
+    checked=1
+  fi
+  [[ "$checked" -eq 1 ]]
 }
 
 require_tools_for_json() {
@@ -853,10 +923,11 @@ check_ports() {
 
 prompt_node() {
   info "节点信息"
+  ensure_node_root_domain
   if [[ -n "$NODE_NAME" ]]; then
     NODE_NAME="${NODE_NAME// /}"
     NODE_NAME="$(lower_text "$NODE_NAME")"
-    NODE_DOMAIN="${NODE_DOMAIN:-${NODE_NAME}.${AKVPS_ROOT_DOMAIN}}"
+    NODE_DOMAIN="${NODE_DOMAIN:-${NODE_NAME}.${AKVPS_NODE_ROOT_DOMAIN}}"
     valid_domain "$NODE_DOMAIN" || die "节点域名格式不正确：$NODE_DOMAIN" "请检查 NODE_NAME 或 NODE_DOMAIN。"
     echo "节点短名：$NODE_NAME"
     echo "节点域名：$NODE_DOMAIN"
@@ -868,7 +939,7 @@ prompt_node() {
     read -r -p "请输入节点短名，例如 jp1: " NODE_NAME
     NODE_NAME="${NODE_NAME// /}"
     NODE_NAME="$(lower_text "$NODE_NAME")"
-    NODE_DOMAIN="${NODE_NAME}.${AKVPS_ROOT_DOMAIN}"
+    NODE_DOMAIN="${NODE_NAME}.${AKVPS_NODE_ROOT_DOMAIN}"
     valid_domain "$NODE_DOMAIN" && break
     echo "节点短名无法组成合法域名，请重新输入。"
   done
@@ -1551,9 +1622,27 @@ setup_komari_server_ufw() {
   ufw reload
 }
 
+root_domain_for_name() {
+  local domain="$1"
+  if [[ -n "$AKVPS_ADMIN_ROOT_DOMAIN" && ( "$domain" == "$AKVPS_ADMIN_ROOT_DOMAIN" || "$domain" == *".${AKVPS_ADMIN_ROOT_DOMAIN}" ) ]]; then
+    printf "%s" "$AKVPS_ADMIN_ROOT_DOMAIN"
+    return
+  fi
+  if [[ -n "$AKVPS_NODE_ROOT_DOMAIN" && ( "$domain" == "$AKVPS_NODE_ROOT_DOMAIN" || "$domain" == *".${AKVPS_NODE_ROOT_DOMAIN}" ) ]]; then
+    printf "%s" "$AKVPS_NODE_ROOT_DOMAIN"
+    return
+  fi
+  if [[ -n "$AKVPS_ROOT_DOMAIN" && ( "$domain" == "$AKVPS_ROOT_DOMAIN" || "$domain" == *".${AKVPS_ROOT_DOMAIN}" ) ]]; then
+    printf "%s" "$AKVPS_ROOT_DOMAIN"
+    return
+  fi
+  printf "%s" "${AKVPS_NODE_ROOT_DOMAIN:-$AKVPS_ADMIN_ROOT_DOMAIN}"
+}
+
 cf_zone_id() {
+  local root_domain="${1:-${AKVPS_NODE_ROOT_DOMAIN:-$AKVPS_ADMIN_ROOT_DOMAIN}}"
   require_tools_for_json
-  cloudflare_api GET "zones?name=$AKVPS_ROOT_DOMAIN" | jq -r '.result[0].id // empty'
+  cloudflare_api GET "zones?name=$root_domain" | jq -r '.result[0].id // empty'
 }
 
 upsert_dns_record() {
@@ -1571,9 +1660,10 @@ upsert_dns_record() {
 
 setup_dns() {
   info "配置 Cloudflare DNS"
-  local zone_id
-  zone_id="$(cf_zone_id)"
-  [[ -n "$zone_id" ]] || die "找不到 Cloudflare Zone：$AKVPS_ROOT_DOMAIN" "请检查 Token 权限是否包含 Zone Read 和 DNS Edit。"
+  local zone_id root_domain
+  root_domain="$(root_domain_for_name "$NODE_DOMAIN")"
+  zone_id="$(cf_zone_id "$root_domain")"
+  [[ -n "$zone_id" ]] || die "找不到 Cloudflare Zone：$root_domain" "请检查 Token 权限是否包含 Zone Read 和 DNS Edit。"
   upsert_dns_record "$zone_id" "A" "$NODE_DOMAIN" "$PUBLIC_IPV4"
   if [[ -n "$PUBLIC_IPV6" ]]; then
     upsert_dns_record "$zone_id" "AAAA" "$NODE_DOMAIN" "$PUBLIC_IPV6"
@@ -1584,9 +1674,10 @@ setup_dns() {
 setup_dns_for_domain() {
   local domain="$1"
   info "配置 Cloudflare DNS"
-  local zone_id
-  zone_id="$(cf_zone_id)"
-  [[ -n "$zone_id" ]] || die "找不到 Cloudflare Zone：$AKVPS_ROOT_DOMAIN" "请检查 Token 权限是否包含 Zone Read 和 DNS Edit。"
+  local zone_id root_domain
+  root_domain="$(root_domain_for_name "$domain")"
+  zone_id="$(cf_zone_id "$root_domain")"
+  [[ -n "$zone_id" ]] || die "找不到 Cloudflare Zone：$root_domain" "请检查 Token 权限是否包含 Zone Read 和 DNS Edit。"
   upsert_dns_record "$zone_id" "A" "$domain" "$PUBLIC_IPV4"
   if [[ -n "$PUBLIC_IPV6" ]]; then
     upsert_dns_record "$zone_id" "AAAA" "$domain" "$PUBLIC_IPV6"
@@ -3415,11 +3506,13 @@ setup_xui_caddy() {
 
 prompt_panel() {
   info "主控面板信息"
+  ensure_admin_root_domain
   while true; do
-    read -r -p "请输入主控短名，例如 panel: " PANEL_NAME
+    read -r -p "请输入主控短名，例如 x [x]: " PANEL_NAME
+    PANEL_NAME="${PANEL_NAME:-x}"
     PANEL_NAME="${PANEL_NAME// /}"
     PANEL_NAME="$(lower_text "$PANEL_NAME")"
-    PANEL_DOMAIN="${PANEL_NAME}.${AKVPS_ROOT_DOMAIN}"
+    PANEL_DOMAIN="${PANEL_NAME}.${AKVPS_ADMIN_ROOT_DOMAIN}"
     valid_domain "$PANEL_DOMAIN" && break
     echo "主控短名无法组成合法域名，请重新输入。"
   done
@@ -3505,7 +3598,8 @@ planned_inbound_kinds() {
 print_node_import_template() {
   local master_ipv4="${1:-$MASTER_IPV4}" master_ipv6="${2:-$MASTER_IPV6}" panel_domain="${3:-$PANEL_DOMAIN}" panel_url="${4:-$PANEL_URL}" panel_token="${5:-$PANEL_API_TOKEN}"
   cat <<EOF
-AKVPS_ROOT_DOMAIN=${AKVPS_ROOT_DOMAIN}
+AKVPS_ADMIN_ROOT_DOMAIN=${AKVPS_ADMIN_ROOT_DOMAIN}
+AKVPS_NODE_ROOT_DOMAIN=${AKVPS_NODE_ROOT_DOMAIN}
 CLOUDFLARE_TOKEN=${CLOUDFLARE_TOKEN}
 MASTER_IPV4=${master_ipv4}
 MASTER_IPV6=${master_ipv6}
@@ -3654,7 +3748,7 @@ prompt_komari() {
     echo "Komari 主站地址：$KOMARI_ENDPOINT"
   else
     while true; do
-      read -r -p "请输入 Komari 主站地址，例如 https://status.kouzho.cc: " KOMARI_ENDPOINT
+      read -r -p "请输入 Komari 主站地址，例如 https://t.example-admin.com: " KOMARI_ENDPOINT
       KOMARI_ENDPOINT="${KOMARI_ENDPOINT%/}"
       [[ "$KOMARI_ENDPOINT" =~ ^https?://[^[:space:]]+$ ]] && break
       echo "地址格式不正确，请以 http:// 或 https:// 开头。"
@@ -3742,11 +3836,13 @@ EOF
 
 prompt_komari_server() {
   info "Komari 主站信息"
+  ensure_admin_root_domain
   while true; do
-    read -r -p "请输入主站短名，例如 status: " KOMARI_SERVER_NAME
+    read -r -p "请输入主站短名，例如 t [t]: " KOMARI_SERVER_NAME
+    KOMARI_SERVER_NAME="${KOMARI_SERVER_NAME:-t}"
     KOMARI_SERVER_NAME="${KOMARI_SERVER_NAME// /}"
     KOMARI_SERVER_NAME="$(lower_text "$KOMARI_SERVER_NAME")"
-    KOMARI_SERVER_DOMAIN="${KOMARI_SERVER_NAME}.${AKVPS_ROOT_DOMAIN}"
+    KOMARI_SERVER_DOMAIN="${KOMARI_SERVER_NAME}.${AKVPS_ADMIN_ROOT_DOMAIN}"
     valid_domain "$KOMARI_SERVER_DOMAIN" && break
     echo "主站短名无法组成合法域名，请重新输入。"
   done
@@ -4066,17 +4162,20 @@ self_check_protocols() {
   [[ "$seen_ufw" == *"allow ${AKVPS_VLESS_PORT}/tcp comment vless reality"* ]]
   [[ "$seen_ufw" != *"${AKVPS_HY2_PORT}/udp"* ]]
   seen_dns=""
-  cf_zone_id() { echo "zone_mock"; }
+  cf_zone_id() {
+    [[ "$1" == "node.example.com" ]] || return 1
+    echo "zone_mock"
+  }
   upsert_dns_record() {
     seen_dns="${seen_dns}$2:$3:$4|"
     return 0
   }
-  AKVPS_ROOT_DOMAIN="example.com"
-  NODE_DOMAIN="aktest.example.com"
+  AKVPS_NODE_ROOT_DOMAIN="node.example.com"
+  NODE_DOMAIN="aktest.node.example.com"
   PUBLIC_IPV4="198.51.100.7"
   PUBLIC_IPV6=""
   setup_dns >/dev/null
-  [[ "$seen_dns" == "A:aktest.example.com:198.51.100.7|" ]]
+  [[ "$seen_dns" == "A:aktest.node.example.com:198.51.100.7|" ]]
   echo "协议解析自检通过。"
 }
 
@@ -4425,6 +4524,7 @@ node_deploy() {
   check_system
   detect_public_ips
   prompt_node
+  prompt_cloudflare_token "$AKVPS_NODE_ROOT_DOMAIN"
   prompt_protocols
   check_ports
   ensure_pre_tuned_or_offer
@@ -4571,10 +4671,10 @@ deploy_master_panel() {
   need_root
   ensure_dirs
   load_envs
-  prompt_cloudflare_token
   check_system
   detect_public_ips
   prompt_panel
+  prompt_cloudflare_token "$AKVPS_ADMIN_ROOT_DOMAIN"
   if port_in_use "$AKVPS_PANEL_PORT"; then
     [[ -x "$XUI_BIN" ]] || die "端口 $AKVPS_PANEL_PORT 已被占用。" "请先释放端口，再重新运行 akvps。"
   fi
@@ -4604,10 +4704,10 @@ deploy_komari_server() {
   need_root
   ensure_dirs
   load_envs
-  prompt_cloudflare_token
   check_system
   detect_public_ips
   prompt_komari_server
+  prompt_cloudflare_token "$AKVPS_ADMIN_ROOT_DOMAIN"
   ensure_pre_tuned_or_offer
   install_komari_server_tools
   setup_komari_server_ufw

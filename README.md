@@ -87,8 +87,8 @@ akvps
 
 ## 基础设置做什么
 
-- `一键导入`：一次性粘贴通用信息和节点预填信息，例如根域名、Cloudflare Token、主控信息、节点短名、节点协议、延迟、Komari 主站地址、自动发现密钥和月重置日。
-- `基础信息`：粘贴导入主控 IPv4、主控 IPv6、Cloudflare Token、根域名。
+- `一键导入`：一次性粘贴通用信息和节点预填信息，例如管理根域名、节点根域名、Cloudflare Token、主控信息、节点短名、节点协议、延迟、Komari 主站地址、自动发现密钥和月重置日。
+- `基础信息`：粘贴导入主控 IPv4、主控 IPv6、Cloudflare Token、管理根域名和节点根域名。
 - `主控信息`：粘贴导入 3x-ui 主控域名、面板完整地址、API Token。
 - `探针信息`：粘贴导入 Komari 主站域名和主站地址。
 - `查看信息`：查看当前配置、远端节点接入信息、面板卡片、探针卡片、主站卡片；Token 默认遮挡。
@@ -97,18 +97,19 @@ akvps
 一键导入示例：
 
 ```env
-AKVPS_ROOT_DOMAIN=kouzho.cc
+AKVPS_ADMIN_ROOT_DOMAIN=admin.example.com
+AKVPS_NODE_ROOT_DOMAIN=node.example.com
 CLOUDFLARE_TOKEN=你的 Cloudflare Token
 MASTER_IPV4=主控 IPv4
 MASTER_IPV6=
-PANEL_DOMAIN=x.kouzho.cc
-PANEL_URL=https://x.kouzho.cc/随机路径
+PANEL_DOMAIN=x.admin.example.com
+PANEL_URL=https://x.admin.example.com/随机路径
 PANEL_API_TOKEN=主控 API Token
 NODE_NAME=jp1
 NODE_PROTOCOLS=vless / hy2端口跳跃
 RTT_MS=180
 VPS_MBPS=1000
-KOMARI_ENDPOINT=https://status.kouzho.cc
+KOMARI_ENDPOINT=https://t.admin.example.com
 KOMARI_AUTO_DISCOVERY_KEY=Komari 自动发现密钥
 KOMARI_MONTH_ROTATE=
 END
@@ -119,7 +120,7 @@ END
 ## 节点部署做什么
 
 - 保存主控 IPv4 和 Cloudflare Token 到 VPS 本机。
-- 生成 `节点短名.kouzho.cc`。
+- 生成 `节点短名.节点根域名`。
 - 如果已完成调优开荒，会跳过调优，不覆盖前面的网络参数。
 - 如果未完成调优开荒，会提示先执行；也可以跳过后继续部署。
 - 配置 Termius 统一 SSH 公钥并禁用密码登录。
@@ -135,7 +136,7 @@ END
 
 ## 主控面板做什么
 
-- 输入主控短名，生成 `主控短名.kouzho.cc`。
+- 输入主控短名，生成 `主控短名.管理根域名`。
 - 复用 Cloudflare Token，自动新增或更新 DNS，小灰云。
 - 用 3x-ui 官方非交互脚本安装或重设主控面板，并通过 Caddy 暴露 HTTPS 面板。
 - 自动生成用户名、密码、随机访问路径和 API Token。
@@ -169,7 +170,7 @@ END
 
 ## 主站部署做什么
 
-- 输入主站短名，生成 `主站短名.kouzho.cc`。
+- 输入主站短名，生成 `主站短名.管理根域名`。
 - 复用 Cloudflare Token，自动新增或更新 DNS，小灰云。
 - 使用 Komari 官方主站安装脚本。
 - 如果本机已经运行 Komari 主站，可选择复用或重装；重装会删除旧 Komari 数据并重新生成账号密码。
@@ -201,7 +202,7 @@ END
 
 - 一台 Debian 12 或 Ubuntu 24.04 新 VPS。
 - 主控 3x-ui 的 IPv4；如果主控有 IPv6，也填 IPv6。
-- Cloudflare Token，权限包含 `Zone Read` 和 `DNS Edit`，作用范围为 `kouzho.cc`。
+- Cloudflare Token，权限包含 `Zone Read` 和 `DNS Edit`，作用范围包含管理根域名和节点根域名。
 - 节点短名，例如 `jp1`。
 - 本地到 VPS 的大概 ping 延迟。
 - 如果使用 Komari 自动发现，可以提前导入 Komari 主站地址、自动发现密钥和月重置日。
