@@ -4712,7 +4712,7 @@ maintenance_menu() {
 updates_menu() {
   while true; do
     echo
-    echo "更新 / 卸载"
+    echo "更新卸载"
     echo "1. 更新脚本"
     echo "2. 更新 3x-ui"
     echo "3. 更新 Komari 探针"
@@ -4772,7 +4772,7 @@ main_menu() {
     echo "3. 基础设置"
     echo "4. 本机部署"
     echo "5. 日常维护"
-    echo "6. 更新 / 卸载"
+    echo "6. 更新卸载"
     echo "q. 退出"
     echo
     read -r -p "请选择: " choice
