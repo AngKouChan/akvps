@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.111-mvp"
+AKVPS_VERSION="0.1.112-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -3491,24 +3491,33 @@ get_xui_api_token() {
 }
 
 verify_local_xui_api_token() {
-  local port="$1" web_base_path="$2" token="$3"
-  local base url response status body
+  local port="$1" web_base_path="$2" token="$3" public_url="${4:-}"
+  local base url response status body urls=()
   base="${web_base_path#/}"
   base="${base%/}"
+  if [[ -n "$public_url" ]]; then
+    public_url="${public_url%/}"
+    urls+=("${public_url}/panel/api/server/status")
+  fi
+  url="http://127.0.0.1:${port}"
+  [[ -n "$base" ]] && url="${url}/${base}"
+  urls+=("${url}/panel/api/server/status")
   url="https://127.0.0.1:${port}"
   [[ -n "$base" ]] && url="${url}/${base}"
-  url="${url}/panel/api/server/status"
+  urls+=("${url}/panel/api/server/status")
 
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    response="$(curl -ksS --connect-timeout 2 --max-time 8 \
-      -H "Authorization: Bearer ${token}" \
-      -H "Accept: application/json" \
-      -w $'\n%{http_code}' "$url" 2>/dev/null || true)"
-    status="$(printf "%s" "$response" | tail -n 1)"
-    body="$(printf "%s" "$response" | sed '$d')"
-    if [[ "$status" =~ ^2[0-9][0-9]$ ]] && printf "%s" "$body" | json_success; then
-      return 0
-    fi
+    for url in "${urls[@]}"; do
+      response="$(curl -ksS --connect-timeout 2 --max-time 8 \
+        -H "Authorization: Bearer ${token}" \
+        -H "Accept: application/json" \
+        -w $'\n%{http_code}' "$url" 2>/dev/null || true)"
+      status="$(printf "%s" "$response" | tail -n 1)"
+      body="$(printf "%s" "$response" | sed '$d')"
+      if [[ "$status" =~ ^2[0-9][0-9]$ ]] && printf "%s" "$body" | json_success; then
+        return 0
+      fi
+    done
     sleep 1
   done
 
@@ -3561,7 +3570,7 @@ install_or_configure_xui() {
   systemctl restart x-ui 2>/dev/null || true
   setup_xui_caddy "$NODE_DOMAIN" "$AKVPS_XUI_PORT"
   XUI_ACCESS_URL="https://${NODE_DOMAIN}/${XUI_WEB_BASE_PATH}"
-  verify_local_xui_api_token "$AKVPS_XUI_PORT" "$XUI_WEB_BASE_PATH" "$XUI_API_TOKEN" \
+  verify_local_xui_api_token "$AKVPS_XUI_PORT" "$XUI_WEB_BASE_PATH" "$XUI_API_TOKEN" "$XUI_ACCESS_URL" \
     || die "3x-ui API Token 已生成，但本机验证未通过。" "请检查 3x-ui 服务状态、面板端口和基础路径。"
   save_config_var "NODE_NAME" "$NODE_NAME"
   save_config_var "NODE_DOMAIN" "$NODE_DOMAIN"
@@ -3574,7 +3583,7 @@ install_or_configure_xui() {
 setup_xui_caddy() {
   local domain="$1" port="$2"
   info "配置 3x-ui HTTPS 反代"
-  upsert_caddy_reverse_proxy "$domain" "127.0.0.1:${port}" https 1
+  upsert_caddy_reverse_proxy "$domain" "127.0.0.1:${port}" http 0
   echo "3x-ui 面板已通过 Caddy 暴露：https://${domain}/${XUI_WEB_BASE_PATH}"
 }
 
@@ -3620,7 +3629,7 @@ install_or_configure_panel_xui() {
   systemctl restart x-ui 2>/dev/null || true
   setup_xui_caddy "$PANEL_DOMAIN" "$AKVPS_PANEL_PORT"
   XUI_ACCESS_URL="https://${PANEL_DOMAIN}/${XUI_WEB_BASE_PATH}"
-  verify_local_xui_api_token "$AKVPS_PANEL_PORT" "$XUI_WEB_BASE_PATH" "$XUI_API_TOKEN" \
+  verify_local_xui_api_token "$AKVPS_PANEL_PORT" "$XUI_WEB_BASE_PATH" "$XUI_API_TOKEN" "$XUI_ACCESS_URL" \
     || die "3x-ui API Token 已生成，但本机验证未通过。" "请检查 3x-ui 服务状态、面板端口和基础路径。"
   save_config_var "PANEL_DOMAIN" "$PANEL_DOMAIN"
   save_config_var "PANEL_URL" "$XUI_ACCESS_URL"
@@ -3757,7 +3766,7 @@ ${proto_lines}
 | BBR/FQ | ${bbr} / ${qdisc} |
 | 3x-ui 服务 | ${status_xui} |
 | HTTPS 地址 | ${XUI_ACCESS_URL} |
-| 面板暴露方式 | Caddy 反代到本机 https://127.0.0.1:${AKVPS_XUI_PORT} |
+| 面板暴露方式 | Caddy HTTPS 反代到本机 http://127.0.0.1:${AKVPS_XUI_PORT} |
 | 用户名 | ${XUI_USERNAME} |
 | 密码 | ${XUI_PASSWORD} |
 
@@ -3798,7 +3807,7 @@ generate_panel_report() {
 | DNS | ${status_dns} |
 | 3x-ui 服务 | ${status_xui} |
 | UFW | ${status_ufw} |
-| HTTPS | Caddy 反代到本机 https://127.0.0.1:${AKVPS_PANEL_PORT} |
+| HTTPS | Caddy HTTPS 反代到本机 http://127.0.0.1:${AKVPS_PANEL_PORT} |
 
 ## 三、后续
 
@@ -4593,6 +4602,13 @@ self_check_bbrv3_invocation() {
   echo "BBRv3 非交互调用自检通过。"
 }
 
+self_check_xui_caddy_flow() {
+  grep -q 'upsert_caddy_reverse_proxy "$domain" "127.0.0.1:${port}" http 0' "$0"
+  grep -q 'urls+=("${public_url}/panel/api/server/status")' "$0"
+  grep -q 'url="http://127.0.0.1:${port}"' "$0"
+  echo "3x-ui Caddy 反代自检通过。"
+}
+
 self_check_pre_tune_skip() {
   local out called old_done old_auto
   old_done="$TUNING_DONE"
@@ -5094,6 +5110,7 @@ case "${1:-menu}" in
   check-tuning|self-check-tuning) self_check_tuning ;;
   check-bbrv3-flow|self-check-bbrv3-flow|check-xanmod-flow|self-check-xanmod-flow) self_check_xanmod_flow ;;
   check-bbrv3-invocation|self-check-bbrv3-invocation) self_check_bbrv3_invocation ;;
+  check-xui-caddy-flow|self-check-xui-caddy-flow) self_check_xui_caddy_flow ;;
   check-pre-tune-skip|self-check-pre-tune-skip) self_check_pre_tune_skip ;;
   check-package-repair|self-check-package-repair) self_check_package_repair ;;
   check-komari-month-rotate|self-check-komari-month-rotate) self_check_komari_month_rotate ;;
