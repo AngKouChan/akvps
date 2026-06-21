@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.106-mvp"
+AKVPS_VERSION="0.1.107-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -15,6 +15,7 @@ AKVPS_SYSCTL="/etc/sysctl.d/99-akvps.conf"
 AKVPS_SSHD_CONF="/etc/ssh/sshd_config.d/99-akvps-key-only.conf"
 AKVPS_HY2_HOP_REDIRECT="/usr/local/sbin/akvps-hy2-hop-redirect"
 AKVPS_HY2_HOP_SERVICE="/etc/systemd/system/akvps-hy2-hop.service"
+AKVPS_BBRV3_SCRIPT_URL="https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/refs/heads/main/net-tcp-tune.sh"
 AKVPS_ROOT_DOMAIN="kouzho.cc"
 AKVPS_XUI_PORT="11123"
 AKVPS_PANEL_PORT="11123"
@@ -646,16 +647,17 @@ tuning_status_text() {
   case "$mode" in
     advanced) mode="进阶" ;;
     basic) mode="基础" ;;
-    xanmod-bbr3) mode="XanMod BBR3" ;;
+    bbrv3) mode="BBRv3" ;;
+    xanmod-bbr3) mode="BBRv3" ;;
     *) mode="稳妥" ;;
   esac
-  if [[ "$KERNEL_MODE" == "xanmod-bbr3" || "$TUNING_MODE" == "xanmod-bbr3" ]]; then
+  if [[ "$KERNEL_MODE" == "bbrv3" || "$KERNEL_MODE" == "xanmod-bbr3" || "$TUNING_MODE" == "bbrv3" || "$TUNING_MODE" == "xanmod-bbr3" ]]; then
     if xanmod_kernel_active; then
-      echo "XanMod BBR3 已生效（${bbr}/${qdisc}）"
+      echo "BBRv3 已生效（${bbr}/${qdisc}）"
     elif [[ "$KERNEL_REBOOT_REQUIRED" == "1" ]]; then
-      echo "XanMod 已安装，待重启"
+      echo "BBRv3 内核已安装，待重启"
     else
-      echo "XanMod BBR3 待安装"
+      echo "BBRv3 待安装"
     fi
     return
   fi
@@ -1171,7 +1173,7 @@ setup_swap() {
     return
   fi
   if [[ "$AKVPS_AUTO_DEPLOY" == "1" ]]; then
-    echo "一键部署：自动创建 1G Swap。"
+    echo "开始部署：自动创建 1G Swap。"
     fallocate -l 1G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=1024
     chmod 600 /swapfile
     mkswap /swapfile
@@ -1202,13 +1204,13 @@ prompt_tuning() {
   echo "1. 稳妥调优（推荐）"
   echo "2. 进阶网络调优"
   echo "3. 基础调优"
-  echo "4. XanMod BBR3（需要重启，进阶）"
+  echo "4. BBRv3（Eric86777/vps-tcp-tune，需要重启）"
   read -r -p "请选择 [1]: " ans
   ans="${ans:-1}"
   case "$ans" in
     2) TUNING_MODE="advanced" ;;
     3) TUNING_MODE="basic" ;;
-    4) TUNING_MODE="xanmod-bbr3"; KERNEL_MODE="xanmod-bbr3" ;;
+    4) TUNING_MODE="bbrv3"; KERNEL_MODE="bbrv3" ;;
     *) TUNING_MODE="smart" ;;
   esac
   save_config_var "TUNING_MODE" "$TUNING_MODE"
@@ -1318,29 +1320,32 @@ EOF
   sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc
 }
 
-install_xanmod_bbr3() {
-  info "安装 XanMod BBR3 内核"
-  # 官方 XanMod 仓库会按发行版提供内核包；安装后需重启才会真正切换内核。
-  case "$(uname -m 2>/dev/null || true)" in
-    x86_64|amd64) ;;
-    *) die "XanMod BBR3 当前只自动支持 x86_64 VPS。" "ARM VPS 请先用默认 BBR+FQ。" ;;
-  esac
-  command -v wget >/dev/null 2>&1 || install_packages wget
-  command -v gpg >/dev/null 2>&1 || install_packages gnupg
-  if [[ ! -f /etc/apt/sources.list.d/xanmod-release.list ]]; then
-    local codename
-    codename="$(. /etc/os-release 2>/dev/null; printf "%s" "${VERSION_CODENAME:-}")"
-    [[ -n "$codename" ]] || codename="$(lsb_release -sc 2>/dev/null || true)"
-    [[ -n "$codename" ]] || die "无法识别系统代号，暂不能自动添加 XanMod 源。" "请先用默认 BBR+FQ。"
-    mkdir -p /etc/apt/keyrings
-    wget -qO - https://dl.xanmod.org/archive.key | gpg --dearmor -o /etc/apt/keyrings/xanmod-archive-keyring.gpg
-    echo "deb [signed-by=/etc/apt/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org ${codename} main" > /etc/apt/sources.list.d/xanmod-release.list
+run_bbrv3_tune_script() {
+  info "运行 BBRv3 优化脚本"
+  local tmp_file
+  command -v curl >/dev/null 2>&1 || install_packages curl
+  echo "将调用 Eric86777/vps-tcp-tune 的 66 一键全自动优化。"
+  tmp_file="$(mktemp)"
+  curl -q -fsSL "$AKVPS_BBRV3_SCRIPT_URL" -o "$tmp_file"
+  chmod +x "$tmp_file"
+  printf '66\nY\n' | bash "$tmp_file"
+  rm -f "$tmp_file"
+}
+
+install_bbrv3() {
+  info "安装/优化 BBRv3"
+  run_bbrv3_tune_script
+  save_config_var "KERNEL_MODE" "bbrv3"
+  KERNEL_MODE="bbrv3"
+  if xanmod_kernel_active; then
+    save_config_var "KERNEL_REBOOT_REQUIRED" "0"
+    KERNEL_REBOOT_REQUIRED="0"
+    echo "BBRv3 优化已执行。"
+  else
+    save_config_var "KERNEL_REBOOT_REQUIRED" "1"
+    KERNEL_REBOOT_REQUIRED="1"
+    echo "BBRv3 内核已安装或正在安装。请现在重启 VPS，重启后再运行 akvps 继续部署。"
   fi
-  install_packages linux-xanmod-x64v3 || install_packages linux-xanmod-x64v2 || install_packages linux-xanmod
-  save_config_var "KERNEL_MODE" "xanmod-bbr3"
-  save_config_var "KERNEL_REBOOT_REQUIRED" "1"
-  KERNEL_REBOOT_REQUIRED="1"
-  echo "XanMod 已安装。请现在重启 VPS，重启后再运行 akvps 继续部署。"
 }
 
 xanmod_kernel_active() {
@@ -1349,16 +1354,20 @@ xanmod_kernel_active() {
 
 ensure_kernel_ready_before_services() {
   load_envs
-  [[ "$KERNEL_MODE" == "xanmod-bbr3" || "$TUNING_MODE" == "xanmod-bbr3" ]] || return 0
+  [[ "$KERNEL_MODE" == "bbrv3" || "$KERNEL_MODE" == "xanmod-bbr3" || "$TUNING_MODE" == "bbrv3" || "$TUNING_MODE" == "xanmod-bbr3" ]] || return 0
   if xanmod_kernel_active; then
     save_config_var "KERNEL_REBOOT_REQUIRED" "0"
     KERNEL_REBOOT_REQUIRED="0"
+    if [[ "$KERNEL_MODE" != "bbrv3" ]]; then
+      save_config_var "KERNEL_MODE" "bbrv3"
+      KERNEL_MODE="bbrv3"
+    fi
     return 0
   fi
-  install_xanmod_bbr3
+  install_bbrv3
   cat <<'EOF'
 
-XanMod BBR3 内核已安装，但还没有生效。
+BBRv3 内核已安装，但还没有生效。
 请现在执行：
   reboot
 
@@ -4220,11 +4229,11 @@ self_check_xanmod_flow() {
   set +e
   (
     AKVPS_CONFIG="$config_path"
-    TUNING_MODE="xanmod-bbr3"
-    KERNEL_MODE="xanmod-bbr3"
+    TUNING_MODE="bbrv3"
+    KERNEL_MODE="bbrv3"
     KERNEL_REBOOT_REQUIRED="0"
-    install_xanmod_bbr3() {
-      save_config_var "KERNEL_MODE" "xanmod-bbr3"
+    install_bbrv3() {
+      save_config_var "KERNEL_MODE" "bbrv3"
       save_config_var "KERNEL_REBOOT_REQUIRED" "1"
       KERNEL_REBOOT_REQUIRED="1"
       return 0
@@ -4239,7 +4248,7 @@ self_check_xanmod_flow() {
   [[ "$status" -eq 0 ]]
   grep -q '^KERNEL_REBOOT_REQUIRED=1$' "$config_path"
   rm -rf "$tmp_dir"
-  echo "XanMod 重启检查点自检通过。"
+  echo "BBRv3 重启检查点自检通过。"
 }
 
 self_check_package_repair() {
@@ -4399,7 +4408,7 @@ one_click_node_deploy() {
   need_root
   ensure_dirs
   AKVPS_AUTO_DEPLOY=1
-  info "一键部署代理节点"
+  info "开始部署代理节点"
   echo "流程：信息注入 -> 代理节点 -> Caddy 反代面板 -> 可选探针 -> 极简报告"
   echo
   import_all_info
@@ -4420,7 +4429,7 @@ one_click_node_deploy() {
 one_click_deploy() {
   while true; do
     echo
-    echo "一键部署"
+    echo "开始部署"
     echo "这台 VPS 准备做什么？"
     echo "1. 代理节点（3x-ui 节点端 + 可选探针）"
     echo "2. 3x-ui 主控（Caddy HTTPS 反代）"
@@ -4663,7 +4672,7 @@ main_menu() {
     echo "Angkou-Vps 轻量版 akvps $AKVPS_VERSION"
     echo
     show_dashboard
-    echo "1. 一键部署"
+    echo "1. 开始部署"
     echo "2. 基础设置"
     echo "3. 本机部署"
     echo "4. 日常维护"
@@ -4690,11 +4699,11 @@ case "${1:-menu}" in
   check-master-flow|self-check-master-flow) self_check_master_flow ;;
   check-redaction|self-check-redaction) self_check_redaction ;;
   check-tuning|self-check-tuning) self_check_tuning ;;
-  check-xanmod-flow|self-check-xanmod-flow) self_check_xanmod_flow ;;
+  check-bbrv3-flow|self-check-bbrv3-flow|check-xanmod-flow|self-check-xanmod-flow) self_check_xanmod_flow ;;
   check-package-repair|self-check-package-repair) self_check_package_repair ;;
   check-komari-month-rotate|self-check-komari-month-rotate) self_check_komari_month_rotate ;;
   menu) main_menu ;;
-  one-click|one-click-deploy) one_click_deploy ;;
+  start|start-deploy|one-click|one-click-deploy) one_click_deploy ;;
   init|initial-setup|node|node-deploy) node_deploy ;;
   panel|deploy-panel|local-deploy) local_deploy_menu ;;
   komari|deploy-komari) deploy_komari ;;
