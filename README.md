@@ -197,7 +197,7 @@ END
 - 3x-ui 主控面板：本机 `11123/tcp`，公网通过 Caddy 的 `443/tcp` 访问。
 - Komari 主站：外部开放 `80/tcp`、`443/tcp`，后端 `25774/tcp` 不直接开放。
 - 订阅站：外部开放 `80/tcp`、`443/tcp`，文件目录默认在 `/var/www/proxy-sub`。
-- VLESS Reality：`11789/tcp`。
+- VLESS Reality：`4433/tcp`。
 - Hysteria2：`11799/udp`。
 - Hysteria2 端口跳跃：服务端口 `11799/udp`，跳跃范围 `39999-59999/udp`。
 

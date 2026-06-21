@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.117-mvp"
+AKVPS_VERSION="0.1.118-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -24,7 +24,7 @@ AKVPS_ROOT_DOMAIN=""
 AKVPS_XUI_PORT="11123"
 AKVPS_PANEL_PORT="11123"
 AKVPS_KOMARI_PORT="25774"
-AKVPS_VLESS_PORT="11789"
+AKVPS_VLESS_PORT="4433"
 AKVPS_HY2_PORT="11799"
 AKVPS_HY2_HOP_START="39999"
 AKVPS_HY2_HOP_END="59999"
@@ -2068,7 +2068,7 @@ mock_state_seed_broken_vless() {
       nodeId: 7,
       tag: "akvps-aktest-vless",
       remark: "aktest vless old",
-      port: 11789,
+      port: 4433,
       protocol: "vless",
       settings: "{\"clients\":[],\"decryption\":\"none\"}",
       streamSettings: "{\"network\":\"tcp\",\"security\":\"reality\",\"realitySettings\":{\"privateKey\":\"old-private\",\"settings\":{\"publicKey\":\"old-public\"},\"shortIds\":[\"oldsid\"],\"target\":\"old.example:443\",\"serverNames\":[\"old.example\"]}}",
@@ -4490,7 +4490,7 @@ self_check_master_flow() {
       nodeId: 7,
       tag: "akvps-old-vless",
       remark: "old vless",
-      port: 11789,
+      port: 4433,
       protocol: "vless",
       settings: "{\"clients\":[],\"decryption\":\"none\"}",
       streamSettings: "{\"network\":\"tcp\",\"security\":\"reality\",\"realitySettings\":{\"privateKey\":\"old-private\",\"settings\":{\"publicKey\":\"old-public\"},\"shortIds\":[\"oldsid\"],\"target\":\"old.example:443\",\"serverNames\":[\"old.example\"]}}",
