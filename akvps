@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-AKVPS_VERSION="0.1.105-mvp"
+AKVPS_VERSION="0.1.106-mvp"
 AKVPS_DIR="/etc/akvps"
 AKVPS_CONFIG="$AKVPS_DIR/config.env"
 AKVPS_SECRETS="$AKVPS_DIR/secrets.env"
@@ -55,6 +55,7 @@ SELECT_HY2=0
 SELECT_HY2_HOP=0
 TUNING_MODE="smart"
 KERNEL_MODE="stock"
+KERNEL_REBOOT_REQUIRED="0"
 VPS_MBPS="1000"
 RTT_MS=""
 LINE_QUALITY="1"
@@ -170,6 +171,7 @@ load_envs() {
   XUI_WEB_BASE_PATH="${XUI_WEB_BASE_PATH:-}"
   TUNING_MODE="${TUNING_MODE:-smart}"
   KERNEL_MODE="${KERNEL_MODE:-stock}"
+  KERNEL_REBOOT_REQUIRED="${KERNEL_REBOOT_REQUIRED:-0}"
   VPS_MBPS="${VPS_MBPS:-1000}"
   RTT_MS="${RTT_MS:-}"
   LINE_QUALITY="${LINE_QUALITY:-1}"
@@ -644,8 +646,19 @@ tuning_status_text() {
   case "$mode" in
     advanced) mode="进阶" ;;
     basic) mode="基础" ;;
+    xanmod-bbr3) mode="XanMod BBR3" ;;
     *) mode="稳妥" ;;
   esac
+  if [[ "$KERNEL_MODE" == "xanmod-bbr3" || "$TUNING_MODE" == "xanmod-bbr3" ]]; then
+    if xanmod_kernel_active; then
+      echo "XanMod BBR3 已生效（${bbr}/${qdisc}）"
+    elif [[ "$KERNEL_REBOOT_REQUIRED" == "1" ]]; then
+      echo "XanMod 已安装，待重启"
+    else
+      echo "XanMod BBR3 待安装"
+    fi
+    return
+  fi
   if [[ "$bbr" == "bbr" && "$qdisc" == "fq" ]]; then
     echo "BBR+FQ（${mode}）"
   else
@@ -1219,9 +1232,6 @@ prompt_tuning() {
 
 apply_tuning() {
   info "应用系统调优"
-  if [[ "$KERNEL_MODE" == "xanmod-bbr3" || "$TUNING_MODE" == "xanmod-bbr3" ]]; then
-    install_xanmod_bbr3
-  fi
   [[ -f "$AKVPS_SYSCTL" ]] && cp -a "$AKVPS_SYSCTL" "$AKVPS_SYSCTL.bak.$(date +%F-%H%M%S)"
   sed -i '/^net\.ipv4\.tcp_adv_win_scale[[:space:]]*=/d' "$AKVPS_SYSCTL" "$AKVPS_SYSCTL".bak.* 2>/dev/null || true
   local mem_kb mem_mb tcp_mem udp_mem rmem_max wmem_max somaxconn backlog syn_backlog notsent_lowat
@@ -1328,7 +1338,33 @@ install_xanmod_bbr3() {
   fi
   install_packages linux-xanmod-x64v3 || install_packages linux-xanmod-x64v2 || install_packages linux-xanmod
   save_config_var "KERNEL_MODE" "xanmod-bbr3"
-  echo "XanMod 已安装。请在本轮部署完成后重启 VPS，再运行：sysctl net.ipv4.tcp_congestion_control"
+  save_config_var "KERNEL_REBOOT_REQUIRED" "1"
+  KERNEL_REBOOT_REQUIRED="1"
+  echo "XanMod 已安装。请现在重启 VPS，重启后再运行 akvps 继续部署。"
+}
+
+xanmod_kernel_active() {
+  uname -r 2>/dev/null | grep -qi 'xanmod'
+}
+
+ensure_kernel_ready_before_services() {
+  load_envs
+  [[ "$KERNEL_MODE" == "xanmod-bbr3" || "$TUNING_MODE" == "xanmod-bbr3" ]] || return 0
+  if xanmod_kernel_active; then
+    save_config_var "KERNEL_REBOOT_REQUIRED" "0"
+    KERNEL_REBOOT_REQUIRED="0"
+    return 0
+  fi
+  install_xanmod_bbr3
+  cat <<'EOF'
+
+XanMod BBR3 内核已安装，但还没有生效。
+请现在执行：
+  reboot
+
+重启后重新运行 akvps，再继续部署 3x-ui、Caddy、DNS 和探针。
+EOF
+  exit 0
 }
 
 setup_ufw() {
@@ -4129,10 +4165,12 @@ EOF
 }
 
 self_check_tuning() {
-  local tmp_dir old_sysctl_path old_tuning old_vps old_rtt old_quality old_path content
+  local tmp_dir old_sysctl_path old_tuning old_kernel old_reboot old_vps old_rtt old_quality old_path content
   tmp_dir="$(mktemp -d)"
   old_sysctl_path="$AKVPS_SYSCTL"
   old_tuning="$TUNING_MODE"
+  old_kernel="$KERNEL_MODE"
+  old_reboot="$KERNEL_REBOOT_REQUIRED"
   old_vps="$VPS_MBPS"
   old_rtt="$RTT_MS"
   old_quality="$LINE_QUALITY"
@@ -4165,12 +4203,43 @@ EOF
   [[ "$(tuning_status_text)" == *"进阶"* ]]
   AKVPS_SYSCTL="$old_sysctl_path"
   TUNING_MODE="$old_tuning"
+  KERNEL_MODE="$old_kernel"
+  KERNEL_REBOOT_REQUIRED="$old_reboot"
   VPS_MBPS="$old_vps"
   RTT_MS="$old_rtt"
   LINE_QUALITY="$old_quality"
   PATH="$old_path"
   rm -rf "$tmp_dir"
   echo "调优参数自检通过。"
+}
+
+self_check_xanmod_flow() {
+  local tmp_dir config_path status
+  tmp_dir="$(mktemp -d)"
+  config_path="$tmp_dir/config.env"
+  set +e
+  (
+    AKVPS_CONFIG="$config_path"
+    TUNING_MODE="xanmod-bbr3"
+    KERNEL_MODE="xanmod-bbr3"
+    KERNEL_REBOOT_REQUIRED="0"
+    install_xanmod_bbr3() {
+      save_config_var "KERNEL_MODE" "xanmod-bbr3"
+      save_config_var "KERNEL_REBOOT_REQUIRED" "1"
+      KERNEL_REBOOT_REQUIRED="1"
+      return 0
+    }
+    xanmod_kernel_active() {
+      return 1
+    }
+    ensure_kernel_ready_before_services >/dev/null
+  )
+  status="$?"
+  set -e
+  [[ "$status" -eq 0 ]]
+  grep -q '^KERNEL_REBOOT_REQUIRED=1$' "$config_path"
+  rm -rf "$tmp_dir"
+  echo "XanMod 重启检查点自检通过。"
 }
 
 self_check_package_repair() {
@@ -4256,6 +4325,7 @@ node_deploy() {
   setup_ssh
   setup_swap
   prompt_tuning
+  ensure_kernel_ready_before_services
   apply_tuning
   setup_ufw
   setup_dns
@@ -4620,6 +4690,7 @@ case "${1:-menu}" in
   check-master-flow|self-check-master-flow) self_check_master_flow ;;
   check-redaction|self-check-redaction) self_check_redaction ;;
   check-tuning|self-check-tuning) self_check_tuning ;;
+  check-xanmod-flow|self-check-xanmod-flow) self_check_xanmod_flow ;;
   check-package-repair|self-check-package-repair) self_check_package_repair ;;
   check-komari-month-rotate|self-check-komari-month-rotate) self_check_komari_month_rotate ;;
   menu) main_menu ;;

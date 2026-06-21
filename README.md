@@ -111,7 +111,7 @@ END
 - 配置 Termius 统一 SSH 公钥并禁用密码登录。
 - 按内存判断是否创建 Swap。
 - 安装必要工具并设置上海时区。
-- 默认使用稳妥调优，也可选择进阶网络调优、基础调优或 XanMod BBR3；XanMod BBR3 需要重启后生效。
+- 默认使用稳妥调优，也可选择进阶网络调优、基础调优或 XanMod BBR3；如果选择 XanMod BBR3，会先安装内核并暂停，重启 VPS 后再继续部署后续服务。
 - 配置 UFW。
 - Cloudflare DNS 小灰云：有 IPv4 建 A，有 IPv6 建 AAAA。
 - 用 3x-ui 官方非交互脚本安装或重设远端节点端，并通过 Caddy 暴露 HTTPS 面板。
